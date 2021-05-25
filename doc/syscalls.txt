@@ -1,0 +1,32 @@
+
+Syscall Documentation
+
+I/O system calls
+
+Name              | Number            | Registers                        | Description
+==================+===================+==================================+==============================
+SWI_STR_WRITE     | 0x10              | in  r7: pointer to the buffer    | Prints data to the DBGU
+                  |                   | in  r8: size of the buffer       |
+                  |                   | out r7: size of the written data |
+------------------+-------------------+----------------------------------+------------------------------
+SWI_STR_READ      | 0x11              | in  r7: pointer to the buffer    | Reads data from the DBGU
+                  |                   | in  r8: size of the buffer       | 
+                  |                   | out r7: size of the read data    |
+
+Thread management system calls
+
+Name              | Number            | Registers                        | Description
+==================+===================+==================================+==============================
+SWI_THREAD_YIELD  | 0x20              |                                  | Terminates the current thread
+                  |                   |                                  |
+------------------+-------------------+----------------------------------+------------------------------
+SWI_THREAD_EXIT   | 0x21              | in  r7: exit code                | Terminates the current thread
+                  |                   |                                  | This call does not return!
+------------------+-------------------+----------------------------------+------------------------------
+SWI_THREAD_CREATE | 0x22              | out r7: the new thread's id      | Creates a new thread with the
+                  |                   |                                  | current one as parent
+------------------+-------------------+----------------------------------+------------------------------
+SWI_THREAD_SLEEP  | 0x23              | in  r7: number of ms to sleep    | Pauses the current thread for
+                  |                   | out r7: the number of ms the     | the given amount of time
+                  |                   |         thread has been awoken   |
+                  |                   |         too early                | 

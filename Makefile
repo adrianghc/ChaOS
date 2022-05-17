@@ -2,34 +2,34 @@ ifndef app
 app = 1
 endif
 
-# BASE = /PATH/TO/GNU/ARM/TOOLCHAIN/
-# SAGE = /import/sage-7.4/local/lib/
-# LD_LIBRARY_PATH = /usr/local/lib:$(SAGE)
-
 CROSS = arm-none-eabi-
-CC = $(BASE)$(CROSS)gcc
-LD = $(BASE)$(CROSS)ld
+CC = $(CROSS)gcc
+LD = $(CROSS)ld
 QEMU = $(BASE)qemu-bsprak
 
 CFLAGS = -Wall -Wextra -ffreestanding -mcpu=arm920t -O0 -g
 LSCRIPT = $(SRCDIR)/kernel.lds
 INCLUDES = -Iinclude/
 
-BUILDDIR = build
+OUTDIR = build
 BINDIR = bin
 SRCDIR = src
 
 PORT = 12345
 
 
-DRIVERS = $(wildcard $(SRCDIR)/drivers/*.c)
-LIB = $(wildcard $(SRCDIR)/lib/*.c)
-SYS = $(wildcard $(SRCDIR)/sys/*.c)
-
-$(shell mkdir -p $(BUILDDIR)/drivers)
-$(shell mkdir -p $(BUILDDIR)/lib)
-$(shell mkdir -p $(BUILDDIR)/sys)
+$(shell mkdir -p $(OUTDIR)/drivers)
+$(shell mkdir -p $(OUTDIR)/lib)
+$(shell mkdir -p $(OUTDIR)/sys)
 $(shell mkdir -p $(BINDIR))
+
+DRIVERS = $(patsubst $(SRCDIR)/drivers/%.c,$(OUTDIR)/drivers/%.o,$(wildcard $(SRCDIR)/drivers/*.c))
+LIB = $(patsubst $(SRCDIR)/lib/%.c,$(OUTDIR)/lib/%.o,$(wildcard $(SRCDIR)/lib/*.c))
+SYS = $(patsubst $(SRCDIR)/sys/%.c,$(OUTDIR)/sys/%.o,$(wildcard $(SRCDIR)/sys/*.c))
+
+$(OUTDIR)/%.o: $(SRCDIR)/%.c
+	$(CC) $(INCLUDES) $(CFLAGS) -c $< -o $@
+
 
 .PHONY: all
 all: kernel
@@ -44,12 +44,13 @@ debug:
 
 .PHONY: clean
 clean:
-	rm -rf $(BUILDDIR)
+	rm -rf $(OUTDIR)
 	rm -rf $(BINDIR)
 
 
-kernel:
-	cat $(SRCDIR)/kernel.c $(SRCDIR)/app$(app).c $(DRIVERS) $(LIB) $(SYS) > $(BUILDDIR)/temp.c
-	LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) $(CC) $(INCLUDES) $(CFLAGS) -o $(BUILDDIR)/$@.o -c $(BUILDDIR)/temp.c
-	$(LD) -T$(LSCRIPT) -o $(BUILDDIR)/$@ $(BUILDDIR)/$@.o
-	cp $(BUILDDIR)/$@ $(BINDIR)/$@
+kernel: $(DRIVERS) $(LIB) $(SYS)
+	cat $(SRCDIR)/kernel.c $(SRCDIR)/app$(app).c > $(OUTDIR)/temp.c
+	$(CC) $(INCLUDES) $(CFLAGS) -c $(OUTDIR)/temp.c -o $(OUTDIR)/$@.o
+	$(LD) -T$(LSCRIPT) -o $(OUTDIR)/$@ $(OUTDIR)/$@.o \
+		$(wildcard $(OUTDIR)/drivers/*.o) $(wildcard $(OUTDIR)/lib/*.o) $(wildcard $(OUTDIR)/sys/*.o)
+	cp $(OUTDIR)/$@ $(BINDIR)/$@

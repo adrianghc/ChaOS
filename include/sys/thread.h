@@ -218,7 +218,7 @@ void thread_unblock_for_timer_prematurely(struct thread_tcb* tcb);
 /**
  * Marks the current thread as blocked with the reason that it is waiting for a timer to finish.
  */
-inline void thread_block_for_timer(struct thread_tcb* tcb);
+void thread_block_for_timer(struct thread_tcb* tcb);
 
 /**
  * Marks all threads as unblocked whose timers have finished.

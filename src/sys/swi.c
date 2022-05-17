@@ -11,6 +11,7 @@
 #include "lib/string.h"
 #include "sys/io.h"
 #include "sys/memmgmt.h"
+#include "sys/thread.h"
 
 
 /* BEGIN System call functions */

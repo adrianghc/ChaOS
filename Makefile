@@ -5,7 +5,8 @@ endif
 CROSS = arm-none-eabi-
 CC = $(CROSS)gcc
 LD = $(CROSS)ld
-QEMU = $(BASE)qemu-bsprak
+QEMU = qemu/build/arm-softmmu/qemu-system-arm
+QEMU_ARGS = -M portux920t -m 64M -nodefaults -nographic -serial mon:stdio
 
 CFLAGS = -Wall -Wextra -ffreestanding -mcpu=arm920t -O0 -g
 LSCRIPT = $(SRCDIR)/kernel.lds
@@ -34,13 +35,27 @@ $(OUTDIR)/%.o: $(SRCDIR)/%.c
 .PHONY: all
 all: kernel
 
+
+.PHONY: qemu
+qemu:
+	git clone https://gitlab.com/qemu-project/qemu.git && \
+	cd qemu && git checkout 6cdf8c4efa073eac7d5f9894329e2d07743c2955 && \
+	git apply ../qemu-patch/portux920t.diff && \
+	mkdir build && cd build && \
+	../configure --disable-werror --target-list=arm-softmmu && make -j$(nproc)
+
+.PHONY: clean-qemu
+clean-qemu:
+	rm -rf qemu
+
+
 .PHONY: run
 run:
-	LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) $(QEMU) -kernel $(BINDIR)/kernel
+	$(QEMU) $(QEMU_ARGS) -kernel $(BINDIR)/kernel
 
 .PHONY: debug
 debug:
-	LD_LIBRARY_PATH=$(LD_LIBRARY_PATH) $(QEMU) -kernel $(BINDIR)/kernel -S -gdb tcp::$(PORT)
+	$(QEMU) $(QEMU_ARGS) -kernel $(BINDIR)/kernel -S -gdb tcp::$(PORT)
 
 .PHONY: clean
 clean:

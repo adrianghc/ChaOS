@@ -1,0 +1,5327 @@
+diff --git a/block/vpc.c b/block/vpc.c
+index 21b08033a6..711adc24f3 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -39,8 +39,6 @@
+ 
+ /**************************************************************/
+ 
+-#define HEADER_SIZE 512
+-
+ //#define CACHE
+ 
+ enum vhd_type {
+@@ -95,8 +93,11 @@ typedef struct vhd_footer {
+     QemuUUID    uuid;
+ 
+     uint8_t     in_saved_state;
++    uint8_t     reserved[427];
+ } QEMU_PACKED VHDFooter;
+ 
++QEMU_BUILD_BUG_ON(sizeof(VHDFooter) != 512);
++
+ typedef struct vhd_dyndisk_header {
+     char        magic[8]; /* "cxsparse" */
+ 
+@@ -127,11 +128,14 @@ typedef struct vhd_dyndisk_header {
+         uint32_t    reserved;
+         uint64_t    data_offset;
+     } parent_locator[8];
++    uint8_t     reserved2[256];
+ } QEMU_PACKED VHDDynDiskHeader;
+ 
++QEMU_BUILD_BUG_ON(sizeof(VHDDynDiskHeader) != 1024);
++
+ typedef struct BDRVVPCState {
+     CoMutex lock;
+-    uint8_t footer_buf[HEADER_SIZE];
++    VHDFooter footer;
+     uint64_t free_data_block_offset;
+     int max_table_entries;
+     uint32_t *pagetable;
+@@ -172,8 +176,9 @@ static QemuOptsList vpc_runtime_opts = {
+ 
+ static QemuOptsList vpc_create_opts;
+ 
+-static uint32_t vpc_checksum(uint8_t* buf, size_t size)
++static uint32_t vpc_checksum(void *p, size_t size)
+ {
++    uint8_t *buf = p;
+     uint32_t res = 0;
+     int i;
+ 
+@@ -216,11 +221,10 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+     BDRVVPCState *s = bs->opaque;
+     int i;
+     VHDFooter *footer;
+-    VHDDynDiskHeader *dyndisk_header;
+     QemuOpts *opts = NULL;
+     Error *local_err = NULL;
+     bool use_chs;
+-    uint8_t buf[HEADER_SIZE];
++    VHDDynDiskHeader dyndisk_header;
+     uint32_t checksum;
+     uint64_t computed_size;
+     uint64_t pagetable_size;
+@@ -249,28 +253,28 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         goto fail;
+     }
+ 
+-    ret = bdrv_pread(bs->file, 0, s->footer_buf, HEADER_SIZE);
++    ret = bdrv_pread(bs->file, 0, &s->footer, sizeof(s->footer));
+     if (ret < 0) {
+         error_setg(errp, "Unable to read VHD header");
+         goto fail;
+     }
+ 
+-    footer = (VHDFooter *) s->footer_buf;
++    footer = &s->footer;
+     if (strncmp(footer->creator, "conectix", 8)) {
+         int64_t offset = bdrv_getlength(bs->file->bs);
+         if (offset < 0) {
+             ret = offset;
+             error_setg(errp, "Invalid file size");
+             goto fail;
+-        } else if (offset < HEADER_SIZE) {
++        } else if (offset < sizeof(*footer)) {
+             ret = -EINVAL;
+             error_setg(errp, "File too small for a VHD header");
+             goto fail;
+         }
+ 
+         /* If a fixed disk, the footer is found only at the end of the file */
+-        ret = bdrv_pread(bs->file, offset-HEADER_SIZE, s->footer_buf,
+-                         HEADER_SIZE);
++        ret = bdrv_pread(bs->file, offset - sizeof(*footer),
++                         footer, sizeof(*footer));
+         if (ret < 0) {
+             goto fail;
+         }
+@@ -284,7 +288,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+ 
+     checksum = be32_to_cpu(footer->checksum);
+     footer->checksum = 0;
+-    if (vpc_checksum(s->footer_buf, HEADER_SIZE) != checksum) {
++    if (vpc_checksum(footer, sizeof(*footer)) != checksum) {
+         error_setg(errp, "Incorrect header checksum");
+         ret = -EINVAL;
+         goto fail;
+@@ -342,22 +346,20 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+     }
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset), buf,
+-                         HEADER_SIZE);
++        ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset),
++                         &dyndisk_header, sizeof(dyndisk_header));
+         if (ret < 0) {
+             error_setg(errp, "Error reading dynamic VHD header");
+             goto fail;
+         }
+ 
+-        dyndisk_header = (VHDDynDiskHeader *) buf;
+-
+-        if (strncmp(dyndisk_header->magic, "cxsparse", 8)) {
++        if (strncmp(dyndisk_header.magic, "cxsparse", 8)) {
+             error_setg(errp, "Invalid header magic");
+             ret = -EINVAL;
+             goto fail;
+         }
+ 
+-        s->block_size = be32_to_cpu(dyndisk_header->block_size);
++        s->block_size = be32_to_cpu(dyndisk_header.block_size);
+         if (!is_power_of_2(s->block_size) || s->block_size < BDRV_SECTOR_SIZE) {
+             error_setg(errp, "Invalid block size %" PRIu32, s->block_size);
+             ret = -EINVAL;
+@@ -365,7 +367,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         }
+         s->bitmap_size = ((s->block_size / (8 * 512)) + 511) & ~511;
+ 
+-        s->max_table_entries = be32_to_cpu(dyndisk_header->max_table_entries);
++        s->max_table_entries = be32_to_cpu(dyndisk_header.max_table_entries);
+ 
+         if ((bs->total_sectors * 512) / s->block_size > 0xffffffffU) {
+             error_setg(errp, "Too many blocks");
+@@ -397,7 +399,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+             goto fail;
+         }
+ 
+-        s->bat_offset = be64_to_cpu(dyndisk_header->table_offset);
++        s->bat_offset = be64_to_cpu(dyndisk_header.table_offset);
+ 
+         ret = bdrv_pread(bs->file, s->bat_offset, s->pagetable,
+                          pagetable_size);
+@@ -537,7 +539,7 @@ static int rewrite_footer(BlockDriverState* bs)
+     BDRVVPCState *s = bs->opaque;
+     int64_t offset = s->free_data_block_offset;
+ 
+-    ret = bdrv_pwrite_sync(bs->file, offset, s->footer_buf, HEADER_SIZE);
++    ret = bdrv_pwrite_sync(bs->file, offset, &s->footer, sizeof(s->footer));
+     if (ret < 0)
+         return ret;
+ 
+@@ -600,9 +602,8 @@ fail:
+ static int vpc_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+ {
+     BDRVVPCState *s = (BDRVVPCState *)bs->opaque;
+-    VHDFooter *footer = (VHDFooter *) s->footer_buf;
+ 
+-    if (be32_to_cpu(footer->type) != VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) != VHD_FIXED) {
+         bdi->cluster_size = s->block_size;
+     }
+ 
+@@ -619,10 +620,9 @@ vpc_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+     int64_t image_offset;
+     int64_t n_bytes;
+     int64_t bytes_done = 0;
+-    VHDFooter *footer = (VHDFooter *) s->footer_buf;
+     QEMUIOVector local_qiov;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_co_preadv(bs->file, offset, bytes, qiov, 0);
+     }
+ 
+@@ -670,10 +670,9 @@ vpc_co_pwritev(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+     int64_t n_bytes;
+     int64_t bytes_done = 0;
+     int ret = 0;
+-    VHDFooter *footer =  (VHDFooter *) s->footer_buf;
+     QEMUIOVector local_qiov;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_co_pwritev(bs->file, offset, bytes, qiov, 0);
+     }
+ 
+@@ -727,13 +726,12 @@ static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
+                                             BlockDriverState **file)
+ {
+     BDRVVPCState *s = bs->opaque;
+-    VHDFooter *footer = (VHDFooter*) s->footer_buf;
+     int64_t image_offset;
+     bool allocated;
+     int ret;
+     int64_t n;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         *pnum = bytes;
+         *map = offset;
+         *file = bs->file->bs;
+@@ -823,11 +821,11 @@ static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
+     return 0;
+ }
+ 
+-static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
++static int create_dynamic_disk(BlockBackend *blk, VHDFooter *footer,
+                                int64_t total_sectors)
+ {
+-    VHDDynDiskHeader *dyndisk_header =
+-        (VHDDynDiskHeader *) buf;
++    VHDDynDiskHeader dyndisk_header;
++    uint8_t bat_sector[512];
+     size_t block_size, num_bat_entries;
+     int i;
+     int ret;
+@@ -837,13 +835,13 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     block_size = 0x200000;
+     num_bat_entries = DIV_ROUND_UP(total_sectors, block_size / 512);
+ 
+-    ret = blk_pwrite(blk, offset, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+ 
+     offset = 1536 + ((num_bat_entries * 4 + 511) & ~511);
+-    ret = blk_pwrite(blk, offset, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+@@ -851,9 +849,9 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     /* Write the initial BAT */
+     offset = 3 * 512;
+ 
+-    memset(buf, 0xFF, 512);
++    memset(bat_sector, 0xFF, 512);
+     for (i = 0; i < DIV_ROUND_UP(num_bat_entries * 4, 512); i++) {
+-        ret = blk_pwrite(blk, offset, buf, 512, 0);
++        ret = blk_pwrite(blk, offset, bat_sector, 512, 0);
+         if (ret < 0) {
+             goto fail;
+         }
+@@ -861,26 +859,27 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     }
+ 
+     /* Prepare the Dynamic Disk Header */
+-    memset(buf, 0, 1024);
++    memset(&dyndisk_header, 0, sizeof(dyndisk_header));
+ 
+-    memcpy(dyndisk_header->magic, "cxsparse", 8);
++    memcpy(dyndisk_header.magic, "cxsparse", 8);
+ 
+     /*
+      * Note: The spec is actually wrong here for data_offset, it says
+      * 0xFFFFFFFF, but MS tools expect all 64 bits to be set.
+      */
+-    dyndisk_header->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+-    dyndisk_header->table_offset = cpu_to_be64(3 * 512);
+-    dyndisk_header->version = cpu_to_be32(0x00010000);
+-    dyndisk_header->block_size = cpu_to_be32(block_size);
+-    dyndisk_header->max_table_entries = cpu_to_be32(num_bat_entries);
++    dyndisk_header.data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
++    dyndisk_header.table_offset = cpu_to_be64(3 * 512);
++    dyndisk_header.version = cpu_to_be32(0x00010000);
++    dyndisk_header.block_size = cpu_to_be32(block_size);
++    dyndisk_header.max_table_entries = cpu_to_be32(num_bat_entries);
+ 
+-    dyndisk_header->checksum = cpu_to_be32(vpc_checksum(buf, 1024));
++    dyndisk_header.checksum = cpu_to_be32(
++        vpc_checksum(&dyndisk_header, sizeof(dyndisk_header)));
+ 
+     /* Write the header */
+     offset = 512;
+ 
+-    ret = blk_pwrite(blk, offset, buf, 1024, 0);
++    ret = blk_pwrite(blk, offset, &dyndisk_header, sizeof(dyndisk_header), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+@@ -890,20 +889,21 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     return ret;
+ }
+ 
+-static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
++static int create_fixed_disk(BlockBackend *blk, VHDFooter *footer,
+                              int64_t total_size, Error **errp)
+ {
+     int ret;
+ 
+     /* Add footer to total size */
+-    total_size += HEADER_SIZE;
++    total_size += sizeof(*footer);
+ 
+     ret = blk_truncate(blk, total_size, false, PREALLOC_MODE_OFF, errp);
+     if (ret < 0) {
+         return ret;
+     }
+ 
+-    ret = blk_pwrite(blk, total_size - HEADER_SIZE, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, total_size - sizeof(*footer),
++                     footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         error_setg_errno(errp, -ret, "Unable to write VHD header");
+         return ret;
+@@ -975,8 +975,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     BlockBackend *blk = NULL;
+     BlockDriverState *bs = NULL;
+ 
+-    uint8_t buf[1024];
+-    VHDFooter *footer = (VHDFooter *) buf;
++    VHDFooter footer;
+     uint16_t cyls = 0;
+     uint8_t heads = 0;
+     uint8_t secs_per_cyl = 0;
+@@ -1039,48 +1038,48 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     }
+ 
+     /* Prepare the Hard Disk Footer */
+-    memset(buf, 0, 1024);
++    memset(&footer, 0, sizeof(footer));
+ 
+-    memcpy(footer->creator, "conectix", 8);
++    memcpy(footer.creator, "conectix", 8);
+     if (vpc_opts->force_size) {
+-        memcpy(footer->creator_app, "qem2", 4);
++        memcpy(footer.creator_app, "qem2", 4);
+     } else {
+-        memcpy(footer->creator_app, "qemu", 4);
++        memcpy(footer.creator_app, "qemu", 4);
+     }
+-    memcpy(footer->creator_os, "Wi2k", 4);
++    memcpy(footer.creator_os, "Wi2k", 4);
+ 
+-    footer->features = cpu_to_be32(0x02);
+-    footer->version = cpu_to_be32(0x00010000);
++    footer.features = cpu_to_be32(0x02);
++    footer.version = cpu_to_be32(0x00010000);
+     if (disk_type == VHD_DYNAMIC) {
+-        footer->data_offset = cpu_to_be64(HEADER_SIZE);
++        footer.data_offset = cpu_to_be64(sizeof(footer));
+     } else {
+-        footer->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
++        footer.data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+     }
+-    footer->timestamp = cpu_to_be32(time(NULL) - VHD_TIMESTAMP_BASE);
++    footer.timestamp = cpu_to_be32(time(NULL) - VHD_TIMESTAMP_BASE);
+ 
+     /* Version of Virtual PC 2007 */
+-    footer->major = cpu_to_be16(0x0005);
+-    footer->minor = cpu_to_be16(0x0003);
+-    footer->orig_size = cpu_to_be64(total_size);
+-    footer->current_size = cpu_to_be64(total_size);
+-    footer->cyls = cpu_to_be16(cyls);
+-    footer->heads = heads;
+-    footer->secs_per_cyl = secs_per_cyl;
++    footer.major = cpu_to_be16(0x0005);
++    footer.minor = cpu_to_be16(0x0003);
++    footer.orig_size = cpu_to_be64(total_size);
++    footer.current_size = cpu_to_be64(total_size);
++    footer.cyls = cpu_to_be16(cyls);
++    footer.heads = heads;
++    footer.secs_per_cyl = secs_per_cyl;
+ 
+-    footer->type = cpu_to_be32(disk_type);
++    footer.type = cpu_to_be32(disk_type);
+ 
+     qemu_uuid_generate(&uuid);
+-    footer->uuid = uuid;
++    footer.uuid = uuid;
+ 
+-    footer->checksum = cpu_to_be32(vpc_checksum(buf, HEADER_SIZE));
++    footer.checksum = cpu_to_be32(vpc_checksum(&footer, sizeof(footer)));
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = create_dynamic_disk(blk, buf, total_sectors);
++        ret = create_dynamic_disk(blk, &footer, total_sectors);
+         if (ret < 0) {
+             error_setg(errp, "Unable to create or write VHD header");
+         }
+     } else {
+-        ret = create_fixed_disk(blk, buf, total_size, errp);
++        ret = create_fixed_disk(blk, &footer, total_size, errp);
+     }
+ 
+ out:
+@@ -1176,9 +1175,8 @@ fail:
+ static int vpc_has_zero_init(BlockDriverState *bs)
+ {
+     BDRVVPCState *s = bs->opaque;
+-    VHDFooter *footer =  (VHDFooter *) s->footer_buf;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_has_zero_init(bs->file->bs);
+     } else {
+         return 1;
+diff --git a/chardev/char-io.c b/chardev/char-io.c
+index 8ced184160..b507c114a4 100644
+--- a/chardev/char-io.c
++++ b/chardev/char-io.c
+@@ -46,6 +46,9 @@ static gboolean io_watch_poll_prepare(GSource *source,
+     IOWatchPoll *iwp = io_watch_poll_from_source(source);
+     bool now_active = iwp->fd_can_read(iwp->opaque) > 0;
+     bool was_active = iwp->src != NULL;
++
++    *timeout = 10;
++
+     if (was_active == now_active) {
+         return FALSE;
+     }
+diff --git a/chardev/char-mux.c b/chardev/char-mux.c
+index 200c62a0d0..0d546b79cc 100644
+--- a/chardev/char-mux.c
++++ b/chardev/char-mux.c
+@@ -197,6 +197,8 @@ static int mux_chr_can_read(void *opaque)
+ {
+     MuxChardev *d = MUX_CHARDEV(opaque);
+     int m = d->focus;
++    mux_chr_accept_input (opaque);
++
+     CharBackend *be = d->backends[m];
+ 
+     if ((d->prod[m] - d->cons[m]) < MUX_BUFFER_SIZE) {
+diff --git a/configure b/configure
+index 6099be1d84..6b5c837166 100755
+--- a/configure
++++ b/configure
+@@ -2045,7 +2045,6 @@ EOF
+   # check we support --no-pie first...
+   if compile_prog "-Werror -fno-pie" "-no-pie"; then
+     CFLAGS_NOPIE="-fno-pie"
+-    LDFLAGS_NOPIE="-nopie"
+   fi
+ 
+   if compile_prog "-fPIE -DPIE" "-pie"; then
+@@ -7508,14 +7507,13 @@ echo "QEMU_CFLAGS=$QEMU_CFLAGS" >> $config_host_mak
+ echo "QEMU_CXXFLAGS=$QEMU_CXXFLAGS" >> $config_host_mak
+ echo "QEMU_INCLUDES=$QEMU_INCLUDES" >> $config_host_mak
+ if test "$sparse" = "yes" ; then
+-  echo "CC           := REAL_CC=\"\$(CC)\" cgcc"       >> $config_host_mak
+-  echo "CPP          := REAL_CC=\"\$(CPP)\" cgcc"      >> $config_host_mak
+-  echo "CXX          := REAL_CC=\"\$(CXX)\" cgcc"      >> $config_host_mak
+-  echo "HOST_CC      := REAL_CC=\"\$(HOST_CC)\" cgcc"  >> $config_host_mak
+-  echo "QEMU_CFLAGS  += -Wbitwise -Wno-transparent-union -Wno-old-initializer -Wno-non-pointer-null" >> $config_host_mak
++   -  echo "CC           := REAL_CC=\"\$(CC)\" cgcc"       >> $config_host_mak
++   -  echo "CPP          := REAL_CC=\"\$(CPP)\" cgcc"      >> $config_host_mak
++   -  echo "CXX          := REAL_CC=\"\$(CXX)\" cgcc"      >> $config_host_mak
++   -  echo "HOST_CC      := REAL_CC=\"\$(HOST_CC)\" cgcc"  >> $config_host_mak
++   -  echo "QEMU_CFLAGS  += -Wbitwise -Wno-transparent-union -Wno-old-initializer -Wno-non-pointer-null" >> $config_host_mak
+ fi
+ echo "LDFLAGS=$LDFLAGS" >> $config_host_mak
+-echo "LDFLAGS_NOPIE=$LDFLAGS_NOPIE" >> $config_host_mak
+ echo "QEMU_LDFLAGS=$QEMU_LDFLAGS" >> $config_host_mak
+ echo "LD_REL_FLAGS=$LD_REL_FLAGS" >> $config_host_mak
+ echo "LD_I386_EMULATION=$ld_i386_emulation" >> $config_host_mak
+diff --git a/default-configs/arm-softmmu.mak b/default-configs/arm-softmmu.mak
+index 1f2e0e7fde..2b834bda4b 100644
+--- a/default-configs/arm-softmmu.mak
++++ b/default-configs/arm-softmmu.mak
+@@ -40,3 +40,4 @@ CONFIG_FSL_IMX25=y
+ CONFIG_FSL_IMX7=y
+ CONFIG_FSL_IMX6UL=y
+ CONFIG_SEMIHOSTING=y
++CONFIG_PORTUX=y
+diff --git a/dtc b/dtc
+index 88f18909db..e54388015a 160000
+--- a/dtc
++++ b/dtc
+@@ -1 +1 @@
+-Subproject commit 88f18909db731a627456f26d779445f84e449536
++Subproject commit e54388015af1fb4bf04d0bca99caba1074d9cc42
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index c6e7782580..e99a799ca9 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -88,6 +88,11 @@ config MUSCA
+     select SPLIT_IRQ
+     select UNIMP
+ 
++config PORTUX
++    bool
++    select AT91EMAC
++    select AT91G20EMAC
++
+ config MUSICPAL
+     bool
+     select BITBANG_I2C
+diff --git a/hw/arm/Makefile.objs b/hw/arm/Makefile.objs
+index fe749f65fd..836b4765e8 100644
+--- a/hw/arm/Makefile.objs
++++ b/hw/arm/Makefile.objs
+@@ -26,6 +26,7 @@ obj-$(CONFIG_VERSATILE) += versatilepb.o
+ obj-$(CONFIG_VEXPRESS) += vexpress.o
+ obj-$(CONFIG_ZYNQ) += xilinx_zynq.o
+ obj-$(CONFIG_SABRELITE) += sabrelite.o
++obj-$(CONFIG_PORTUX) += portux920t.o portuxg20.o
+ 
+ obj-$(CONFIG_ARM_V7M) += armv7m.o
+ obj-$(CONFIG_EXYNOS4) += exynos4210.o
+diff --git a/hw/arm/boot.c b/hw/arm/boot.c
+index 8fb4a63606..3ca2a3cba4 100644
+--- a/hw/arm/boot.c
++++ b/hw/arm/boot.c
+@@ -790,6 +790,10 @@ static void do_cpu_reset(void *opaque)
+             }
+         }
+         arm_rebuild_hflags(env);
++        /* Portux920T Special Case: We want to have a SP after booting for techGI 3 */
++		if(info->board_id==0x310){
++			env->regs[13]=0x200F00;
++		}
+     }
+ }
+ 
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+new file mode 100644
+index 0000000000..795e8dbc50
+--- /dev/null
++++ b/hw/arm/portux920t.c
+@@ -0,0 +1,335 @@
++/*
++ * ARM Taskit Portux920T Emulation
++ *
++ * Written by Christian René Sechting, Daniel Röhrig
++ *
++ * Loosely based on the Platform/Application Baseboard emulation
++ * written by Paul Brook
++ *
++ * This code is licensed under the GPL.
++ *
++ * Warning: This is not a full emulation of the Portux920t!
++ *
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "cpu.h"
++#include "migration/vmstate.h"
++#include "hw/sysbus.h"
++#include "hw/net/at91emac.h"
++#include "sysemu/sysemu.h"
++#include "hw/arm/boot.h"
++#include "hw/boards.h"
++#include "exec/address-spaces.h"
++#include "net/net.h"
++#include "hw/char/at91.h"
++
++/*
++ * ++++++++++++++++++++++++++++++++++++
++ * Memory Controller for the Portux920t
++ * ++++++++++++++++++++++++++++++++++++
++ *
++ * Everything that triggers an operation on the memory
++ * regions of the 920T is declared here
++ */
++static MemoryRegion *ram_alias; // XX shouldn't be global probably
++
++#define TYPE_PORTUX920MC "portux920mc"
++#define PORTUX920MC(obj) OBJECT_CHECK(portux920mc_state, (obj), TYPE_PORTUX920MC)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++
++    uint32_t asr;
++    uint32_t aasr;
++    uint32_t mpr;
++} portux920mc_state;
++
++static const VMStateDescription vmstate_portux920mc = {
++    .name = "at91aic",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32(mpr, portux920mc_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++/*
++ * Overlay Flash-Memory at address 0x0
++ *
++ * ctrl == true  ==> toggle
++ * ctrl == false ==> disable
++ */
++static void do_remap(bool ctrl)
++{
++    if(ctrl){
++        if(ram_alias->enabled) {
++            memory_region_set_enabled(ram_alias, false);
++        } else {
++            memory_region_set_enabled(ram_alias, true);
++        }
++    } else {
++        memory_region_set_enabled(ram_alias, false);
++    }
++}
++
++/*
++ * Read-Access (not implented -> return 0 if not a bad offset)
++ */
++static uint64_t portux920mc_read(void *opaque, hwaddr offset, unsigned size)
++{
++    portux920mc_state *s = PORTUX920MC(opaque);
++    uint32_t asr;
++
++    switch (offset) {
++    case 0x4: // Abort Status Register
++        asr = s->asr;
++        s->asr &= ~0x0f000000;
++        return asr;
++    case 0x8: // Abort Address Status Register
++        return s->aasr;
++    case 0xC: // Master Priority Register
++        return s->mpr;
++    default:
++        fprintf(stderr, "portux920mc_read: Bad offset %x (returning zero)\n", (int)offset);
++        return 0;
++    }
++}
++
++/*
++ * Write-Access
++ */
++static void portux920mc_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    portux920mc_state *s = PORTUX920MC(opaque);
++
++    switch (offset) {
++    case 0x0: // Remap Control Register
++        if(value & 0x1){
++            do_remap(true);
++        }
++        break;
++    case 0xC: // Master Priority Register
++        s->mpr = value & 0x00007777;
++        break;
++    default:
++        fprintf(stderr, "portux920mc_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static void portux920mc_reset(DeviceState *dev) {
++    portux920mc_state *s = PORTUX920MC(dev);
++
++    s->mpr = 0x3210;
++    s->asr = 0;
++    s->aasr = 0;
++    do_remap(false);
++}
++
++/*
++ * Functions that will be used when somebody tries
++ * to do an operation on the memory regions
++ */
++static const MemoryRegionOps portux920mc_ops = {
++    .read = portux920mc_read,
++    .write = portux920mc_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++/*
++ * Initialization of the memory regions and the IRQ
++ */
++static void portux920mc_realize(DeviceState *dev, Error **errp)
++{
++    portux920mc_state *s = PORTUX920MC(dev);
++
++    memory_region_init_io(&s->iomem, OBJECT(s), &portux920mc_ops, s, "portux920mc", 0x50);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++
++    portux920mc_reset(dev);
++}
++
++/*
++ * ++++++++++++++++++++++++
++ * End of Memory Controller
++ * ++++++++++++++++++++++++
++ */
++
++
++
++
++/*
++ * ++++++++++++++++++++
++ * Board initialization
++ * ++++++++++++++++++++
++ * Everything that is needed to initialize the board goes here
++ *
++ */
++static struct arm_boot_info portux920t_binfo;
++
++static void portux920t_init(MachineState *machine)
++{
++    Object *cpuobj;
++    ram_addr_t ram_size = machine->ram_size;
++    MemoryRegion *sysmem = get_system_memory();
++    MemoryRegion *ram = g_new(MemoryRegion, 1); //1MB Internal Ram
++    MemoryRegion *ram2 = g_new(MemoryRegion, 1); //64MB External Ram
++    ram_alias = g_new(MemoryRegion, 1); //1MB Ram Alias
++    qemu_irq aic[32];
++    qemu_irq aic_sys[32];
++    DeviceState *dev;
++    ARMCPU *cpu;
++
++    /* Warning! This is in fact just a copy of the arm926 with a V4T chip set
++       instead of a V5! */
++    cpuobj = object_new(machine->cpu_type);
++    object_property_set_bool(cpuobj, true, "realized", &error_fatal);
++
++    cpu = ARM_CPU(cpuobj);
++    if (!cpu) {
++        fprintf(stderr, "Unable to find CPU definition\n");
++        exit(1);
++    }
++
++    /* Initialize 1MB RAM and 64MB RAM */
++    memory_region_init_ram(ram, NULL, "internal.ram", 0x100000, NULL);
++    memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000, NULL); //Memory-Size is fixed at 64M
++    //memory_region_init_ram(nand_flash, NULL, "LCD.ram", 0x40); //Cute 64Byte, no not K just B
++    //vmstate_register_ram_global(ram);
++    //vmstate_register_ram_global(ram2);
++    /* 1MB ram at address zero.  */
++    memory_region_add_subregion(sysmem, 0x200000, ram);
++    memory_region_set_enabled(ram, true);
++    /* ram_alias: Map the 0x200000 Internal RAM and overlay it at 0x0 (disabled at first)*/
++    memory_region_init_alias(ram_alias, NULL, "ram.remapped", ram, 0x0, 0x100000);
++    memory_region_add_subregion(sysmem,0x0, ram_alias);
++    memory_region_set_enabled(ram_alias, true);
++    do_remap(false); //Just enable the internal RAM, do not remap
++    memory_region_add_subregion(sysmem, 0x20000000, ram2);
++
++    /* Initialize Memory Controller */
++    dev = qdev_create(NULL, "portux920mc");
++    qdev_init_nofail(dev);
++    sysbus_mmio_map((SysBusDevice *)dev, 0, 0xFFFFFF00);
++
++
++
++    /*
++     * +++++++++++
++     * IRQ and AIC
++     * +++++++++++
++     * CPU-interrupt and advanced interrupt controller setup
++     */
++
++    /* Create AIC and connect to CPU */
++    dev = sysbus_create_varargs("at91aic", 0xFFFFF000,
++	    qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ),
++	    qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_FIQ),
++	    NULL);
++
++    /* Set up 32 hardware interrupt connections for AIC */
++    int n;
++    for (n = 0; n < 32; n++) {
++        aic[n] = qdev_get_gpio_in(dev, n);
++    }
++
++    /* Create OR-Logic for interrupts of SYS devices */
++    dev = sysbus_create_simple("at91_intor", -1, aic[1]);
++    for (n = 0; n < 32; n++) {
++        aic_sys[n] = qdev_get_gpio_in(dev, n);
++    }
++
++    /*
++     * ++++++++++++++++++
++     * Ethernet EMAC Card
++     * ++++++++++++++++++
++     * This is legacy code (as far as we know)
++     */
++    // Initialize at91emac on interrupt-line 24
++    if (nd_table[0].used){
++        at91emac_init1(&nd_table[0], 0xFFFBC000, aic[24]);
++    }
++
++    /*
++     * +++++++++
++     * Periphery
++     * +++++++++
++     */
++    at91dbgu_create(0xFFFFF200, aic_sys[0], serial_hd(0));
++    sysbus_create_simple("at91pio", 0xFFFFF400, NULL);
++    sysbus_create_simple("at91st", 0xFFFFFD00, aic_sys[1]);
++    at91usart_create(0xFFFC0000, NULL, serial_hd(1));
++    at91usart_create(0xFFFC4000, NULL, serial_hd(2));
++    at91usart_create(0xFFFC8000, NULL, serial_hd(3));
++    at91usart_create(0xFFFCC000, NULL, serial_hd(4));
++
++    sysbus_create_simple("at91display", 0x40000000, NULL);
++
++
++    /*
++     * +++++++++++++
++     * INFO FOR QEMU
++     * +++++++++++++
++     */
++    portux920t_binfo.ram_size = ram_size;
++    portux920t_binfo.board_id = 0x310; //found at arm.linux.org.uk/developer/machines/
++    portux920t_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
++
++    arm_load_kernel(cpu, machine, &portux920t_binfo);
++}
++
++static void portux920t_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->desc = "ARM Taskit Portux920t (ARM920)";
++    mc->init = portux920t_init;
++    //mc->block_default_type = IF_SCSI; XXX
++    //mc->ignore_memory_transaction_failures = true;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
++}
++
++static const TypeInfo portux920t_type = {
++    .name = MACHINE_TYPE_NAME("portux920t"),
++    .parent = TYPE_MACHINE,
++    .class_init = portux920t_class_init,
++};
++
++
++/* Register the machine */
++static void portux920t_machine_init(void)
++{
++    type_register_static(&portux920t_type);
++}
++
++type_init(portux920t_machine_init);
++
++
++/* Initialize Memory Controller Class */
++static void portux920mc_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = portux920mc_realize;
++    dc->reset = portux920mc_reset;
++    dc->vmsd = &vmstate_portux920mc;
++}
++
++static const TypeInfo portux920mc_info = {
++    .name          = TYPE_PORTUX920MC,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(portux920mc_state),
++    .class_init    = portux920mc_class_init,
++};
++
++/* Register machine */
++static void portux920t_register_types(void)
++{
++    type_register_static(&portux920mc_info);
++}
++
++type_init(portux920t_register_types)
+diff --git a/hw/arm/portuxg20.c b/hw/arm/portuxg20.c
+new file mode 100644
+index 0000000000..4ac90eb157
+--- /dev/null
++++ b/hw/arm/portuxg20.c
+@@ -0,0 +1,130 @@
++/*
++ *
++ *    ARM taskit PortuxG20
++ *
++ */
++
++#include "qemu/osdep.h"
++#include "cpu.h"
++#include "migration/vmstate.h"
++#include "hw/sysbus.h"
++#include "hw/arm/boot.h"
++#include "hw/boards.h"
++#include "exec/address-spaces.h"
++#include "net/net.h"
++#include "hw/net/at91g20emac.h"
++
++/* Board init.  */
++static struct arm_boot_info portuxg20_binfo;
++
++//static MemoryRegion *ram_alias;
++
++static void portuxg20_init(MachineState *machine)
++{
++    Object *cpuobj;
++    ram_addr_t ram_size = machine->ram_size;
++    ARMCPU *cpu;
++    MemoryRegion *sysmem = get_system_memory();
++    MemoryRegion *sram0 = g_new(MemoryRegion, 1); //internal 16kB Ram
++    MemoryRegion *sram1 = g_new(MemoryRegion, 1); //internal 16kB Ram
++    MemoryRegion *sdram = g_new(MemoryRegion, 1); //sdram auf 0x20000000
++    qemu_irq aic[32];
++    qemu_irq aic_sys[32];
++    DeviceState *dev;
++
++    cpuobj = object_new(machine->cpu_type);
++
++    cpu = ARM_CPU(cpuobj);
++    if (!cpu) {
++        fprintf(stderr, "Unable to find CPU definition\n");
++        exit(1);
++    }
++
++    /* Initialize RAM */
++    memory_region_init_ram(sram0, NULL, "Internal SRAM0", 0x4000, NULL); // 16kB sram0
++    memory_region_init_ram(sram1, NULL, "Internal SRAM1", 0x4000, NULL); // 16kB sram1
++    memory_region_init_ram(sdram, NULL, "SDRAM", 0x8000000, NULL);         // 128MB sdram
++    vmstate_register_ram_global(sram0);
++    vmstate_register_ram_global(sram1);
++    vmstate_register_ram_global(sdram);
++    memory_region_add_subregion(sysmem,0x200000, sram0);
++    memory_region_add_subregion(sysmem,0x300000, sram1);
++    memory_region_add_subregion(sysmem,0x20000000, sdram);
++
++    /*
++     * +++++++++++
++     * IRQ and AIC
++     * +++++++++++
++     * CPU-interrupt and advanced interrupt controller setup
++     */
++
++    /* Create AIC and connect to CPU */
++    dev = sysbus_create_varargs("at91aic", 0xFFFFF000,
++	    qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ),
++	    qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_FIQ),
++	    NULL);
++
++    /* Set up 32 hardware interrupt connections for AIC */
++    int n;
++    for (n = 0; n < 32; n++) {
++        aic[n] = qdev_get_gpio_in(dev, n);
++    }
++
++    /* Create OR-Logic for interrupts of SYS devices */
++    dev = sysbus_create_simple("at91_intor", -1, aic[1]);
++    for (n = 0; n < 32; n++) {
++        aic_sys[n] = qdev_get_gpio_in(dev, n);
++    }
++
++    /*
++     * ++++++++++++++++++
++     * Ethernet EMAC Card
++     * ++++++++++++++++++
++     */
++    if (nd_table[0].used){
++        at91g20emac_init1(&nd_table[0], 0xFFFC4000, aic[21]);
++    }
++
++    /* dbgu, usarts, pio's und systemtimer */
++    sysbus_create_simple("at91dbgu", 0xFFFFF200, aic_sys[0]);
++    sysbus_create_simple("at91pio", 0xFFFFF400, NULL);
++    sysbus_create_simple("at91pio", 0xFFFFF600, NULL);
++    sysbus_create_simple("at91pio", 0xFFFFF800, NULL);
++    sysbus_create_simple("at91g20st", 0xFFFFFD20, aic_sys[1]); //RealTime, Periodic, Watchdog
++    sysbus_create_simple("at91usart", 0xFFFB0000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFB4000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFB8000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFD0000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFD4000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFD8000, NULL);
++
++
++    portuxg20_binfo.ram_size = ram_size;
++    portuxg20_binfo.board_id = 0x88F; //auf seite arm.linux.org.uk/developer/machines/ zu finden
++    portuxg20_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
++    arm_load_kernel(cpu, machine, &portuxg20_binfo);
++}
++
++static void portuxg20_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++
++    mc->desc = "ARM Taskit PortuxG20 (ARM926EJ-S)";
++    mc->init = portuxg20_init;
++    //mc->block_default_type = IF_SCSI; XXX ?
++    //mc->ignore_memory_transaction_failures = true;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
++}
++
++static const TypeInfo portuxg20_type = {
++    .name = MACHINE_TYPE_NAME("portuxg20"),
++    .parent = TYPE_MACHINE,
++    .class_init = portuxg20_class_init,
++};
++
++static void portuxg20_machine_init(void)
++{
++    type_register_static(&portuxg20_type);
++}
++
++type_init(portuxg20_machine_init);
+diff --git a/hw/char/Makefile.objs b/hw/char/Makefile.objs
+index 02d8a66925..950d25016f 100644
+--- a/hw/char/Makefile.objs
++++ b/hw/char/Makefile.objs
+@@ -23,6 +23,9 @@ obj-$(CONFIG_STM32F2XX_USART) += stm32f2xx_usart.o
+ obj-$(CONFIG_RASPI) += bcm2835_aux.o
+ 
+ common-obj-$(CONFIG_CMSDK_APB_UART) += cmsdk-apb-uart.o
++
++obj-$(CONFIG_PORTUX) += at91dbgu.o at91usart.o
++
+ common-obj-$(CONFIG_ETRAXFS) += etraxfs_ser.o
+ common-obj-$(CONFIG_ISA_DEBUG) += debugcon.o
+ common-obj-$(CONFIG_GRLIB) += grlib_apbuart.o
+diff --git a/hw/char/at91dbgu.c b/hw/char/at91dbgu.c
+new file mode 100644
+index 0000000000..59ccb08993
+--- /dev/null
++++ b/hw/char/at91dbgu.c
+@@ -0,0 +1,436 @@
++/*
++ * Debug Unit
++ *
++ * No support for Channel Test Modes.
++ * Every baud rate work; no parity checks.
++ */
++
++#include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/qdev-properties.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "chardev/char-fe.h"
++
++#define TYPE_AT91DBGU "at91dbgu"
++#define AT91DBGU(obj) OBJECT_CHECK(at91dbgu_state, (obj), TYPE_AT91DBGU)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    CharBackend chr;
++
++    // DBGU Register
++    uint32_t cr;
++    uint32_t mr;
++    uint32_t imr;
++    uint32_t sr;
++    uint32_t rhr;
++    uint32_t brgr;
++
++    // DMA Register
++    uint32_t periph_rpr; // Receive Pointer Register
++    uint32_t periph_rcr; // Receive Counter Register
++    uint32_t periph_tpr; // Transmit Pointer Register
++    uint32_t periph_tcr; // Transmit Counter Register
++    uint32_t periph_rnpr; // Receive Next Pointer Register
++    uint32_t periph_rncr; // Receive Next Counter Register
++    uint32_t periph_tnpr; // Transmit Next Pointer Register
++    uint32_t periph_tncr; // Transmit Next Counter Register
++    uint32_t periph_ptsr; // Transfer Status Register
++
++} at91dbgu_state;
++
++static const VMStateDescription vmstate_at91dbgu = {
++    .name = "at91dbgu",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .minimum_version_id_old = 1,
++    .fields      = (VMStateField[]) {
++        VMSTATE_UINT32(cr, at91dbgu_state),
++        VMSTATE_UINT32(mr, at91dbgu_state),
++        VMSTATE_UINT32(imr, at91dbgu_state),
++        VMSTATE_UINT32(sr, at91dbgu_state),
++        VMSTATE_UINT32(rhr, at91dbgu_state),
++        VMSTATE_UINT32(brgr, at91dbgu_state),
++        VMSTATE_UINT32(periph_rpr, at91dbgu_state),
++        VMSTATE_UINT32(periph_rcr, at91dbgu_state),
++        VMSTATE_UINT32(periph_tpr, at91dbgu_state),
++        VMSTATE_UINT32(periph_tcr, at91dbgu_state),
++        VMSTATE_UINT32(periph_rnpr, at91dbgu_state),
++        VMSTATE_UINT32(periph_rncr, at91dbgu_state),
++        VMSTATE_UINT32(periph_tnpr, at91dbgu_state),
++        VMSTATE_UINT32(periph_tncr, at91dbgu_state),
++        VMSTATE_UINT32(periph_ptsr, at91dbgu_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++#define DBGU_CR     0x00
++#define DBGU_MR     0x04
++#define DBGU_IER    0x08
++#define DBGU_IDR    0x0c
++#define DBGU_IMR    0x10
++#define DBGU_SR     0x14
++#define DBGU_RHR    0x18
++#define DBGU_THR    0x1c
++#define DBGU_BRGR   0x20
++#define DBGU_CIDR   0x40
++#define DBGU_EXID   0x44
++
++#define RSTRX   (1 << 2)
++#define RSTTX   (1 << 3)
++#define RXEN    (1 << 4)
++#define RXDIS   (1 << 5)
++#define TXEN    (1 << 6)
++#define TXDIS   (1 << 7)
++#define RSTSTA  (1 << 8)
++
++#define DBGU_MR_MASK    0xce00
++#define CHMODE_MASK     0xc000
++#define PAR_MASK        0x0e00
++
++#define DBGU_SR_MASK    0xc0001afb
++#define RXRDY   (1 << 0)
++#define TXRDY   (1 << 1)
++#define ENDRX   (1 << 3)
++#define ENDTX   (1 << 4)
++#define OVRE    (1 << 5)
++#define FRAME   (1 << 6)
++#define PARE    (1 << 7)
++#define TXEMPTY (1 << 9)
++#define TXBUFE  (1 << 11)
++#define RXBUFF  (1 << 12)
++#define COMMTX  (1 << 30)
++#define COMMRX  (1 << 31)
++
++#define DBGU_RHR_MASK   0xff
++#define DBGU_THR_MASK   0xff
++#define DBGU_BRGR_MASK  0xffff
++
++#define PERIPH_RPR  0x100
++#define PERIPH_RCR  0x104
++#define PERIPH_TPR  0x108
++#define PERIPH_TCR  0x10c
++#define PERIPH_RNPR 0x110
++#define PERIPH_RNCR 0x114
++#define PERIPH_TNPR 0x118
++#define PERIPH_TNCR 0x11c
++#define PERIPH_PTCR 0x120
++#define PERIPH_PTSR 0x124
++
++#define PERIPH_RCR_MASK 0xffff
++#define PERIPH_TCR_MASK 0xffff
++#define PERIPH_RNCR_MASK 0xffff
++#define PERIPH_TNCR_MASK 0xffff
++
++#define RXTEN   (1 << 0)
++#define RXTDIS  (1 << 1)
++#define TXTEN   (1 << 8)
++#define TXTDIS  (1 << 9)
++
++static void at91dbgu_send(void *opaque, const uint8_t *buf, int size)
++{
++    at91dbgu_state *s = opaque;
++
++    qemu_chr_fe_write(&s->chr, buf, size);
++}
++
++static void at91dbgu_update(at91dbgu_state *s)
++{
++    /* process PDC receive */
++    if (s->periph_rcr == 0 && s->periph_rncr != 0) {
++        s->periph_rcr = s->periph_rncr;
++        s->periph_rpr = s->periph_rnpr;
++        s->periph_rncr = 0;
++    }
++    if (s->periph_ptsr & RXTEN) {
++        if (s->sr & RXRDY && s->periph_rcr > 0) {
++            char c = s->rhr;
++            cpu_physical_memory_write(s->periph_rpr, &c, 1);
++            s->periph_rcr -= 1;
++            s->periph_rpr += 1;
++            s->sr &= ~RXRDY;
++            if (s->periph_rcr == 0 && s->periph_rncr != 0) {
++                s->periph_rcr = s->periph_rncr;
++                s->periph_rpr = s->periph_rnpr;
++                s->periph_rncr = 0;
++            }
++        }
++    }
++    if (s->periph_rcr == 0) {
++        s->sr |= ENDRX;
++        if (s->periph_rncr == 0) {
++            s->sr |= RXBUFF;
++        }
++    }
++
++    /* process PDC transmit */
++    if (s->periph_tcr == 0 && s->periph_tncr != 0) {
++        s->periph_tcr = s->periph_tncr;
++        s->periph_tpr = s->periph_tnpr;
++        s->periph_tncr = 0;
++    }
++    if (s->periph_ptsr & TXTEN && s->cr & TXEN) {
++        while (s->periph_tcr) {
++            uint32_t len = s->periph_tcr <= 32 ? s->periph_tcr : 32;
++            uint8_t buf[32];
++            cpu_physical_memory_read(s->periph_tpr, buf, len);
++            at91dbgu_send(s, buf, len);
++            s->periph_tpr += len;
++            s->periph_tcr -= len;
++
++            if (s->periph_tcr == 0 && s->periph_tncr != 0) {
++                s->periph_tcr = s->periph_tncr;
++                s->periph_tpr = s->periph_tnpr;
++                s->periph_tncr = 0;
++            }
++        }
++    }
++    if (s->periph_tcr == 0) {
++        s->sr |= ENDTX;
++        if (s->periph_tncr == 0) {
++            s->sr |= TXBUFE;
++        }
++    }
++
++    /* update IRQs */
++    qemu_set_irq(s->irq, s->sr & s->imr);
++}
++
++static void at91dbgu_receive(void *opaque, const uint8_t *buf, int size)
++{
++    at91dbgu_state *s = opaque;
++
++    if (!(s->cr & RXEN)) {
++        return;
++    }
++
++    s->rhr = *buf;
++    if (s->sr & RXRDY) {
++        s->sr |= OVRE;
++    } else {
++        s->sr |= RXRDY;
++    }
++    at91dbgu_update(s);
++}
++
++static int at91dbgu_can_receive(void *opaque)
++{
++    at91dbgu_state *s = opaque;
++    if (s->sr & RXRDY) {
++        return 0;
++    } else {
++        return 1;
++    }
++}
++
++static void at91dbgu_event(void *opaque, int event)
++{
++}
++
++static uint64_t at91dbgu_read(void *opaque, hwaddr offset, unsigned size)
++{
++    at91dbgu_state *s = opaque;
++
++    switch (offset) {
++        case DBGU_MR: // Mode Register
++            return s->mr;
++        case DBGU_IMR: // Interrupt Mask Register
++            return s->imr;
++        case DBGU_SR: // Status Register
++            return s->sr;
++        case DBGU_RHR: // Receive Holding Register
++            s->sr &= ~RXRDY;
++            at91dbgu_update(s);
++            return s->rhr;
++        case DBGU_BRGR: // Baud Rate Generator Register
++            return s->brgr;
++        case DBGU_CIDR: // Chip Id Register
++                // 0bENNNAAAAAAAASSSS0000NNNNPPPVVVVV
++            return 0b00001001001010010000001010000000;
++        case DBGU_EXID: // Chip Id Extension Register
++            return 0;
++        case PERIPH_RPR: // Receive Pointer Register
++            return s->periph_rpr;
++        case PERIPH_RCR: // Receive Counter Register
++            return s->periph_rcr;
++        case PERIPH_TPR: // Transmit Pointer Register
++            return s->periph_tpr;
++        case PERIPH_TCR: // Transmit Counter Register
++            return s->periph_tcr;
++        case PERIPH_RNPR: // Receive Next Pointer Register
++            return s->periph_rnpr;
++        case PERIPH_RNCR: // Receive Next Counter Register
++            return s->periph_rncr;
++        case PERIPH_TNPR: // Transmit Next Pointer Register
++            return s->periph_tnpr;
++        case PERIPH_TNCR: // Transmit Next Counter Register
++            return s->periph_tncr;
++        case PERIPH_PTSR: // Transfer Status Register
++            return s->periph_ptsr;
++        default:
++            fprintf(stderr, "at91dbgu_read: Bad offset %x (returning zero)\n", (int)offset);
++            return 0;
++    }
++}
++
++static void at91dbgu_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    at91dbgu_state *s = opaque;
++
++    switch (offset) {
++        case DBGU_CR: // Control Register
++            if (value & RSTRX) {
++                s->cr &= ~RXEN;
++            }
++            if (value & RSTTX) {
++                s->cr &= ~TXEN;
++            }
++            if (value & RXEN) {
++                s->cr |= RXEN;
++            }
++            if (value & RXDIS) {
++                s->cr &= ~RXEN;
++            }
++            if (value & TXEN) {
++                s->cr |= TXEN;
++            }
++            if (value & TXDIS) {
++                s->cr &= ~TXEN;
++            }
++            if (value & RSTSTA) {
++                s->sr &= ~(PARE | FRAME | OVRE);
++            }
++            at91dbgu_update(s);
++            break;
++        case DBGU_MR: // Mode Register
++            s->mr = value & DBGU_MR_MASK;
++            break;
++        case DBGU_IER: // Interrupt Enable Register
++            s->imr |= value & DBGU_SR_MASK;
++            at91dbgu_update(s);
++            break;
++        case DBGU_IDR: // Interrupt Disable Register
++            s->imr &= ~value;
++            at91dbgu_update(s);
++            break;
++        case DBGU_THR: // Transmit Holding Register
++            if (s->cr & TXEN) {
++                unsigned char ch = value;
++                at91dbgu_send(s, &ch, 1);
++            }
++            break;
++        case DBGU_BRGR: // Baud Rate Generator Register
++            s->brgr = value & DBGU_BRGR_MASK;
++            break;
++        case PERIPH_RPR: // Receive Pointer Register
++            s->periph_rpr = value;
++            break;
++        case PERIPH_RCR: // Receive Counter Register
++            s->periph_rcr = value & PERIPH_RCR_MASK;
++            at91dbgu_update(s);
++            break;
++        case PERIPH_TPR: // Transmit Pointer Register
++            s->periph_tpr = value;
++            break;
++        case PERIPH_TCR: // Transmit Counter Register
++            s->periph_tcr = value & PERIPH_TCR_MASK;
++            at91dbgu_update(s);
++            break;
++        case PERIPH_RNPR: // Receive Next Pointer Register
++            s->periph_rnpr = value;
++            break;
++        case PERIPH_RNCR: // Receive Next Counter Register
++            s->periph_rncr = value & PERIPH_RNCR_MASK;
++            at91dbgu_update(s);
++            break;
++        case PERIPH_TNPR: // Transmit Next Pointer Register
++            s->periph_tnpr = value;
++            break;
++        case PERIPH_TNCR: // Transmit Next Counter Register
++            s->periph_tncr = value & PERIPH_TNCR_MASK;
++            at91dbgu_update(s);
++            break;
++        case PERIPH_PTCR: // Transfer Control Register
++            s->periph_ptsr |= value & (RXTEN | TXTEN);
++            s->periph_ptsr &= ~((value & (RXTDIS | TXTDIS)) >> 1);
++            at91dbgu_update(s);
++            break;
++        default:
++            fprintf(stderr, "at91dbgu_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static const MemoryRegionOps at91dbgu_ops = {
++    .read = at91dbgu_read,
++    .write = at91dbgu_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91dbgu_init(Object *obj)
++{
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    at91dbgu_state *s = AT91DBGU(obj);
++
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91dbgu_ops, s, "at91dbgu", 0x200);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++
++    // DBGU
++    s->cr = TXEN | RXEN; /* Should be zero */
++    s->mr = 0x0;
++    s->imr = 0x0;
++    s->sr = TXRDY | TXEMPTY; /* Should be zero */
++    s->rhr = 0x0;
++    s->brgr = 0x0;
++
++    // PDC
++    s->periph_rpr = 0x0;
++    s->periph_rcr = 0x0;
++    s->periph_tpr = 0x0;
++    s->periph_tcr = 0x0;
++    s->periph_rnpr = 0x0;
++    s->periph_rncr = 0x0;
++    s->periph_tnpr = 0x0;
++    s->periph_tncr = 0x0;
++    s->periph_ptsr = 0x0;
++}
++
++static void at91dbgu_realize(DeviceState *dev, Error **errp)
++{
++    at91dbgu_state *s = AT91DBGU(dev);
++
++    qemu_chr_fe_set_handlers(&s->chr, at91dbgu_can_receive, at91dbgu_receive,
++            at91dbgu_event, NULL, s, NULL, true);
++}
++
++static Property at91dbgu_properties[] = {
++    DEFINE_PROP_CHR("chardev", at91dbgu_state, chr),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void at91dbgu_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = at91dbgu_realize;
++    dc->vmsd = &vmstate_at91dbgu;
++    dc->props = at91dbgu_properties;
++}
++
++static const TypeInfo at91dbgu_info = {
++    .name          = TYPE_AT91DBGU,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91dbgu_state),
++    .instance_init = at91dbgu_init,
++    .class_init    = at91dbgu_class_init,
++};
++
++static void at91dbgu_register_types(void)
++{
++    type_register_static(&at91dbgu_info);
++}
++
++type_init(at91dbgu_register_types)
+diff --git a/hw/char/at91usart.c b/hw/char/at91usart.c
+new file mode 100644
+index 0000000000..052d275663
+--- /dev/null
++++ b/hw/char/at91usart.c
+@@ -0,0 +1,341 @@
++/*
++ * Portux920t USART
++ */
++
++#include "qemu/osdep.h"
++#include "hw/qdev-properties.h"
++#include "hw/irq.h"
++#include "migration/vmstate.h"
++#include "hw/sysbus.h"
++#include "chardev/char.h"
++#include "chardev/char-fe.h"
++
++/* Control Register */
++#define CR_RXEN (1<<4)
++#define CR_TXEN (1<<6)
++#define CR_RXDIS (1<<5)
++#define CR_TXDIS (1<<7)
++#define CR_RSTRX (1<<2)
++#define CR_RSTTX (1<<3)
++/* Interrupt Mask Register */
++#define IMR_RXRDY (1<<0)
++#define IMR_TXRDY (1<<1)
++/* Channel Status Register */
++#define CSR_RXRDY (1<<0)
++#define CSR_TXRDY (1<<1)
++#define CSR_OVRE (1<<5)
++#define CSR_TXEMPTY (1<<9)
++
++
++#define TYPE_AT91USART "at91usart"
++#define AT91USART(obj) OBJECT_CHECK(at91usart_state, (obj), TYPE_AT91USART)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint32_t cr;
++    uint32_t mr;
++    uint32_t imr;
++    uint32_t csr;
++    uint32_t rhr;
++    CharBackend chr;
++    qemu_irq irq;
++    const unsigned char *id;
++    //DMA Register
++    uint32_t periph_rpr; //Receive Pointer Register
++    uint32_t periph_rcr; //Receive Counter Register
++    uint32_t periph_tpr; //Transmit Pointer Register
++    uint32_t periph_tcr; //Transmit Counter Register
++    uint32_t periph_rnpr; //Receive Next Pointer Register
++    uint32_t periph_rncr; //Receive Next Counter Register
++    uint32_t periph_tnpr; //Transmit Next Pointer Register
++    uint32_t periph_tncr; //Transmit Next Counter Register
++    uint32_t periph_ptcr; //Transfer Control Register
++    uint32_t periph_ptsr; //Transfer Status Register
++} at91usart_state;
++
++/*
++ * source: 0=receive 1=transmit
++ */
++static void at91usart_update(at91usart_state *s, int source)
++{
++    if((1<<source)&s->imr){
++        qemu_set_irq(s->irq, 1);
++    }
++}
++
++static uint64_t at91usart_read(void *opaque, hwaddr offset,
++                           unsigned size)
++{
++
++    at91usart_state *s = (at91usart_state *)opaque;
++    switch (offset) {
++    case 0x04: /* US_MR */
++        return s->mr;
++    case 0x10: /* US_IMR */
++        return s->imr;
++    case 0x14: /* US_CSR */
++        return s->csr;
++    case 0x18: /* US_RHR */
++        return s->rhr;
++    case 0x20: /* US_BRGR (not implemented -> return 0) */
++        return 0;
++    case 0x24: /* US_RTOR (not implemented -> return 0) */
++        return 0;
++    case 0x28: /* US_TTGR (not implemented -> return 0) */
++        return 0;
++    case 0x40: /* US_FIDI (not implemented -> return 0) */
++        return 0;
++    case 0x44: /* US_NER (not implemented -> return 0) */
++        return 0;
++    case 0x4C: /* US_IF (not implemented -> return 0) */
++        return 0;
++    case 0x100: //Receive Pointer Register
++        return s->periph_rpr;
++    case 0x104: //Receive Counter Register
++        return s->periph_rcr;
++    case 0x108: //Transmit Pointer Register
++        return s->periph_tpr;
++    case 0x10C: //Receive Pointer Register
++        return s->periph_tcr;
++    case 0x110: //Receive Next Pointer Register
++        return s->periph_rnpr;
++    case 0x114: //Receive Next Counter Register
++        return s->periph_rncr;
++    case 0x118: //Transmit Next Pointer Register
++        return s->periph_tnpr;
++    case 0x11C: //Transmit Next Counter Register
++        return s->periph_tncr;
++    case 0x124: //Transfer Status Register
++        return s->periph_ptsr;
++    default:
++        fprintf(stderr, "at91usart_read: Bad offset %x (returning zero)\n", (int)offset);
++        return 0;
++    }
++}
++
++static void at91usart_write(void *opaque, hwaddr offset,
++                        uint64_t value, unsigned size)
++{
++    at91usart_state *s = (at91usart_state *)opaque;
++    unsigned char ch;
++    switch (offset) {
++    case 0x00: /* US_CR */
++        if((value&CR_RXEN)&&!(s->cr&(1<<5))){
++            s->cr |= CR_RXEN; //enable receive
++        }
++        if((value&CR_TXEN)&&!(s->cr&(1<<7))){
++            s->cr |= CR_TXEN; //enable transmit
++        }
++
++        if(value&CR_RXDIS){    //disable receiver
++            if(s->cr&CR_RXEN) s->cr &= ~CR_RXEN;
++            s->cr |= CR_RXDIS;
++        }
++        if(value&CR_TXDIS){ //disable dtransmitter
++            if(s->cr&CR_TXEN) s->cr &= ~CR_TXEN;
++            s->cr |= CR_TXDIS;
++            s->csr &= ~(CSR_TXRDY|CSR_TXEMPTY);
++        }
++        if(value&CR_RSTRX){
++            s->cr &= ~0x34; //reset CR_RXEN
++        }
++        if(value&CR_RSTTX){
++            s->cr &= ~0xC8; //reset CR_TXEN
++        }
++        break;
++    case 0x04: /* US_MR */
++        s->mr = value;
++        break;
++    case 0x08: /* US_IER */
++        s->imr |= value;
++        break;
++    case 0x0C: /* US_IDR */
++        s->imr &= ~value;
++        break;
++    case 0x1C: /* US_THR */
++        ch = value;
++        if(s->cr & CR_TXEN){
++            s->csr&=~CSR_TXRDY; //upon writing a char into the thr register set transmitter ready bit in the csr to 0
++            qemu_chr_fe_write(&s->chr, &ch, 1);
++            if(!(s->cr&CR_TXDIS))s->csr|=CSR_TXRDY;// set transmitter ready bit in the csr wieder to 1
++            at91usart_update(s,1);
++        }
++        break;
++    case 0x20: /* US_BRGR (not implemented) */
++        //Baud Rate Generator not needed
++        break;
++    case 0x24: /* US_RTOR (not implemented) */
++        //do nothing
++        break;
++    case 0x28: /* US_TTGR (not implemented) */
++        //do nothing
++        break;
++    case 0x40: /* US_FIDI (not implemented) */
++        //do nothing
++        break;
++    case 0x4C: /* US_IF (not implemented) */
++        //do nothing
++        break;
++    case 0x100: //Receive Pointer Register
++        s->periph_rpr=value;
++        break;
++    case 0x104: //Receive Counter Register
++        s->periph_rcr=value;
++        break;
++    case 0x108: //Transmit Pointer Register
++        s->periph_tpr=value;
++        break;
++    case 0x10C: //Transmit Counter Register
++        s->periph_tcr=value;
++        break;
++    case 0x110: //Receive Next Pointer Register
++        s->periph_rnpr=value;
++        break;
++    case 0x114: //Receive Next Counter Register
++        s->periph_rncr=value;
++        break;
++    case 0x118: //Transmit Next Pointer Register
++        s->periph_tnpr=value;
++        break;
++    case 0x11C: //Transmit Next Counter Register
++        s->periph_tncr=value;
++        break;
++    case 0x120: //Transfer Control Register
++        if(value&(1<<1)){
++            s->periph_ptsr&=~0x1;
++        }else{
++            if(value&(1<<0)){
++                s->periph_ptsr|=0x1;
++            }
++        }
++
++        if(value&(1<<9)){
++            s->periph_ptsr&=~(1<<8);
++        }else{
++            if(value&(1<<8)){
++                s->periph_ptsr|=(1<<8);
++                void * buf = malloc(sizeof(uint8_t)*1024);
++                cpu_physical_memory_read(s->periph_tpr,buf,s->periph_tcr);
++                //qemu_chr_fe_open(&s->chr);
++                qemu_chr_fe_write(&s->chr,buf,s->periph_tcr);
++                //qemu_chr_fe_close(&s->chr);
++            }
++        }
++
++        s->periph_ptcr=value;
++        break;
++    default:
++        fprintf(stderr, "at91usart_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static int at91usart_can_receive(void *opaque)
++{
++    at91usart_state *s = (at91usart_state *)opaque;
++    if (s->cr&CR_RXEN)
++        return 1;
++    else
++        return 0;
++}
++
++
++static void at91usart_receive(void *opaque, const uint8_t *buf, int size)
++{
++    at91usart_state *s = (at91usart_state *)opaque;
++
++    if(s->periph_ptcr>0){
++        //DMA-Ready
++            cpu_physical_memory_write (s->periph_rpr, buf, 1);
++            s->periph_rcr-=1;
++            s->periph_rpr+=1;
++        }else{
++            if(*buf == 195){ //Necessary for special characters
++
++            }else{
++                if(s->cr&CR_RXEN){
++                        s->rhr=*buf;
++                        if(s->csr&CSR_RXRDY) s->csr |= CSR_OVRE;
++                        s->csr |= CSR_RXRDY;
++                    at91usart_update(s,0);
++                    }
++            }
++        }
++}
++
++static void at91usart_event(void *opaque, int event)
++{
++
++}
++
++static const MemoryRegionOps at91usart_ops = {
++    .read = at91usart_read,
++    .write = at91usart_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static const VMStateDescription vmstate_at91usart = {
++    .name = "at91usart",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .minimum_version_id_old = 1,
++    .fields      = (VMStateField[]) {
++        VMSTATE_UINT32(cr, at91usart_state),
++        VMSTATE_UINT32(mr, at91usart_state),
++        VMSTATE_UINT32(imr, at91usart_state),
++        VMSTATE_UINT32(csr, at91usart_state),
++        VMSTATE_UINT32(rhr, at91usart_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void at91usart_init(Object *obj)
++{
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    at91usart_state *s = AT91USART(obj);
++
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91usart_ops, s, "at91usart", 0x1000);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    s->cr = 0x0;
++    s->csr = (1<<4); //Always set the End of Transfer signal to active
++}
++
++static void at91usart_realize(DeviceState *dev, Error **errp)
++{
++    at91usart_state *s = AT91USART(dev);
++
++    qemu_chr_fe_set_handlers(&s->chr, at91usart_can_receive, at91usart_receive,
++                              at91usart_event, NULL, s, NULL, true);
++}
++
++static Property at91usart_properties[] = {
++    DEFINE_PROP_CHR("chardev", at91usart_state, chr),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++static void at91usart_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = at91usart_realize;
++    dc->vmsd = &vmstate_at91usart;
++    dc->props = at91usart_properties;
++}
++
++static const TypeInfo at91usart_info = {
++    .name          = TYPE_AT91USART,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91usart_state),
++    .instance_init = at91usart_init,
++    .class_init    = at91usart_class_init,
++};
++
++
++
++static void at91usart_register_types(void)
++{
++    type_register_static(&at91usart_info);
++}
++
++type_init(at91usart_register_types)
+diff --git a/hw/display/Makefile.objs b/hw/display/Makefile.objs
+index f2182e3bef..f969599599 100644
+--- a/hw/display/Makefile.objs
++++ b/hw/display/Makefile.objs
+@@ -43,6 +43,8 @@ common-obj-$(CONFIG_NEXTCUBE) += next-fb.o
+ 
+ obj-$(CONFIG_VGA) += vga.o
+ 
++obj-y += at91display.o
++
+ common-obj-$(CONFIG_QXL) += qxl.o qxl-logger.o qxl-render.o
+ 
+ obj-$(CONFIG_VIRTIO_GPU) += virtio-gpu-base.o virtio-gpu.o virtio-gpu-3d.o
+diff --git a/hw/display/at91display.c b/hw/display/at91display.c
+new file mode 100644
+index 0000000000..9a0a323ace
+--- /dev/null
++++ b/hw/display/at91display.c
+@@ -0,0 +1,93 @@
++/**
++ * Portux920T display a,b and c
++ */
++
++#include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/sysbus.h"
++
++#define TYPE_AT91DISPLAY "at91display"
++#define AT91DISPLAY(obj) OBJECT_CHECK(at91display_state, (obj), TYPE_AT91DISPLAY)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    uint32_t charreg;
++} at91display_state;
++
++static uint64_t at91display_read(void *opaque, hwaddr offset, unsigned size)
++{
++    return 0;
++}
++
++static void at91display_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    at91display_state *s = (at91display_state *)opaque;
++
++    //TODO: Don't write if Chipselect is LOW?
++    /*printf("\nW:%c",(char)value);
++    fflush(0);*/
++    switch (offset) {
++        case 0: //at91display enable register
++            s->charreg = value; //der value wird ins at91display status register eingetragen
++            unsigned int buf[1];
++            buf[0]=value;
++            cpu_physical_memory_write(0xfffff500,buf,1);
++            break;
++        default:
++            fprintf(stderr, "at91display A Write: Bad offset %x\n", (int)offset);
++    }
++}
++
++
++static const MemoryRegionOps at91display_ops = {
++    .read = at91display_read,
++    .write = at91display_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static const VMStateDescription vmstate_at91display = {
++    .name = "at91display",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .minimum_version_id_old = 1,
++    .fields      = (VMStateField[]) {
++        VMSTATE_UINT32(charreg, at91display_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void at91display_init(Object *obj)
++{
++    at91display_state *s = AT91DISPLAY(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->iomem, obj, &at91display_ops, s, "at91display", 0x40);
++    sysbus_init_mmio(sbd, &s->iomem);
++}
++
++static void at91display_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++    dc->vmsd = &vmstate_at91display;
++}
++
++static const TypeInfo at91display_info = {
++    .name          = TYPE_AT91DISPLAY,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91display_state),
++    .instance_init = at91display_init,
++    .class_init    = at91display_class_init,
++};
++
++static void at91display_register_types(void)
++{
++    //Achtung! Hier können auch mehrere verschiedene TypeInfos angegeben werden!
++    type_register_static(&at91display_info);
++}
++
++
++
++type_init(at91display_register_types)
+diff --git a/hw/gpio/Makefile.objs b/hw/gpio/Makefile.objs
+index d305b3b24b..75e2cac984 100644
+--- a/hw/gpio/Makefile.objs
++++ b/hw/gpio/Makefile.objs
+@@ -10,3 +10,4 @@ obj-$(CONFIG_IMX) += imx_gpio.o
+ obj-$(CONFIG_RASPI) += bcm2835_gpio.o
+ obj-$(CONFIG_NRF51_SOC) += nrf51_gpio.o
+ obj-$(CONFIG_ASPEED_SOC) += aspeed_gpio.o
++obj-$(CONFIG_PORTUX) += at91pio.o
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+new file mode 100644
+index 0000000000..ea1adf3bbb
+--- /dev/null
++++ b/hw/gpio/at91pio.c
+@@ -0,0 +1,380 @@
++/**
++ * Portux920T PIO a,b and c
++ */
++
++#include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/sysbus.h"
++#include "chardev/char-fe.h"
++#include "trace.h"
++
++#define TYPE_AT91PIO "at91pio"
++#define AT91PIO(obj) OBJECT_CHECK(at91pio_state, (obj), TYPE_AT91PIO)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    qemu_irq irq;
++    //PIO A
++    uint32_t pioa_psr;
++    uint32_t pioa_osr;
++    uint32_t pioa_odsr;
++    //PIO B
++    uint32_t piob_psr;
++    uint32_t piob_osr;
++    uint32_t piob_odsr;
++    //PIO C
++    uint32_t pioc_psr;
++    uint32_t pioc_osr;
++    uint32_t pioc_odsr;
++
++    //Display
++    uint32_t display_pos;
++    uint8_t display[128];
++
++} at91pio_state;
++
++//KBS-Special-Telnet-Client
++Chardev *char_kbs;
++extern int pio_telnet;
++
++static uint64_t at91pio_read(void *opaque, hwaddr offset, unsigned size)
++{
++    at91pio_state *s = (at91pio_state *)opaque;
++    if(offset<0x200){
++        switch (offset) {
++            //PIO A
++            case 0x8:
++                return s->pioa_psr;
++            case 0x18:
++                return s->pioa_osr;
++            case 0x38:
++                return s->pioa_odsr;
++            default:
++                fprintf(stderr, "PIO A Read: Bad Offset %x (returning zero)\n", (int)offset);
++                return 0;
++        }
++    }else if(offset<0x400){
++        switch (offset) {
++            //PIO B
++            case 0x208:
++                return s->piob_psr;
++            case 0x218:
++                return s->piob_osr;
++            case 0x238:
++                return s->piob_odsr;
++            default:
++                fprintf(stderr, "PIO B Read: Bad Offset %x (returning zero)\n", (int)(offset-0x200));
++                return 0;
++        }
++    }else{
++        switch (offset) {
++            //PIO C
++            case 0x408:
++                return s->pioc_psr;
++            case 0x418:
++                return s->pioc_osr;
++            case 0x438:
++                return s->pioc_odsr;
++            default:
++                fprintf(stderr, "PIO C Read: Bad Offset %x (returning zero)\n", (int)(offset-0x400));
++                return 0;
++        }
++    }
++        return 0;
++}
++
++static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    //printf("\nPIO WRITE: %X | %X",offset, value);
++    //fflush(0);
++    at91pio_state *s = (at91pio_state *)opaque;
++    trace_at91pio_setreg(0xfffff400+offset, value);
++
++    uint32_t pioc_ctrl, piob_ctrl;
++
++    int i = 0;
++    int j = 0;//Counter
++
++    //PIO A
++    if(offset<0x200){
++        switch (offset) {
++            case 0: //pio enable register
++                s->pioa_psr = s->pioa_psr|value; //der value wird ins pio status register eingetragen
++                break;
++            case 4: //pio disable register
++                s->pioa_psr = s->pioa_psr&(~value); //der value wird bitwise negiert und mit psr verunded
++                break;
++            case 0x10: //output enable register
++                s->pioa_osr = s->pioa_osr|value;
++                break;
++            case 0x14: //output disable register
++                s->pioa_osr = s->pioa_psr&(~value);
++                break;
++            case 0x30: //set output data register
++                s->pioa_odsr = s->pioa_odsr|value;
++                break;
++            case 0x34: //clear output data register
++                s->pioa_odsr = s->pioa_odsr&(~value);
++                break;
++            case 0x70: //For Flock-OS, does nothing
++                break;
++            case 0x100: //This register is originally never used so we use it for executing commands from the at91display.c
++                //PIOC PSR and OSR Enabled, ReadWrite, RegionSelect and ChipSelect
++                if((((s->pioc_psr) & (s->pioc_osr))&0x1C00)==0x1C00){
++                    //Is ODSR ChipSelect set to low (0)
++                    if((s->pioc_odsr&(1<<12))==0){
++                        //Command..
++                        if((s->pioc_odsr&(3<<10))==0){
++                        //printf("\nODSR 10 Bit: %X",(s->pioc_odsr&(3<<10)));
++                            while((value>>i)>0 && i<8){
++                                i++;
++                            }
++                            //printf("\n I: %d",(i));
++                            //fflush(0);
++                            switch(i){
++                                //Clear Display
++                                case 0x1:
++                                    for(j=0; j<64; j++){
++                                        s->display[j]='\0';
++                                    }
++                                    s->display_pos=0;
++                                    break;
++                                //Return Home (do not delete)
++                                case 0x2:
++                                    //TODO Beim Shiften wird der alte Zustand wieder hergestellt
++                                    s->display_pos=0;
++                                    break;
++                                //Entry Mode Set
++                                case 0x3:
++                                //    printf("Entry Set: %X",value);
++                                    //TODO: Variable kann hoch oder runtergezählt werden, je nach Laufrichtung
++                                    //TODO: Shiften?
++                                    break;
++                                //Display On Off (Cursor Blinks and stuff)
++                                case 0x4:
++                                    //printf("Display ON - Value: %X",value);
++                                    break;
++
++                                //Cursor or Display Shift
++                                case 0x5:
++                                    break;
++                                //Function Set
++                                case 0x6:
++                                    //8 or 4 Bit -- Not fully implented
++                                    break;
++
++                                //Set CGRAM Address
++                                case 0x7:
++                                    break;
++
++                                //Chose Row
++                                case 0x8:
++                                    //printf("\nROW Value: 0x%X\n",(value&0x7F));
++                                    s->display_pos=(value&0x7F);
++                                    break;
++                                default:
++                                    break;
++                            }
++
++                        // or Character
++                        }else if((s->pioc_odsr&(1<<10))==0x400){
++                            if(s->display_pos>=128){
++                                s->display_pos=0;
++                            }
++                            s->display[s->display_pos]=(char)value;
++                            s->display_pos++;
++                        }//Reading is not implemented
++
++                    }
++                }
++
++                break;
++            default:
++                fprintf(stderr, "PIO A Write: Bad offset %x\n", (int)offset);
++        }
++    }else if(offset<0x400){
++        switch (offset) {
++                case 0x200: //pio enable register
++
++                    s->piob_psr = s->piob_psr|value; //der value wird ins pio status register eingetragen
++                    break;
++                case 0x204: //pio disable register
++                    s->piob_psr = s->piob_psr&(~value); //der value wird bitwise negiert und mit psr verunded
++                    break;
++                case 0x210: //output enable register
++                    s->piob_osr = s->piob_osr|value;
++                    break;
++                case 0x214: //output disable register
++                    s->piob_osr = s->piob_psr&(~value);
++                    break;
++                case 0x230: //set output data register
++                    s->piob_odsr = s->piob_odsr|value;
++                    if (s->piob_osr & s->piob_psr & s->piob_odsr & (1<<27)) {
++                        trace_at91pio_led((char*)"yellow", (char*)"on");
++                    }
++                    break;
++                case 0x234: //clear output data register
++                    s->piob_odsr = s->piob_odsr&(~value);
++                    if (!(s->piob_osr & s->piob_psr & s->piob_odsr & (1<<27))) {
++                        trace_at91pio_led((char*)"yellow", (char*)"off");
++                    }
++                    break;
++                case 0x270: //TODO Micha? Sind das Lampen? Pio ASR
++                    break;
++                default:
++                    fprintf(stderr, "PIO B Write: Bad offset %x\n", (int)(offset-0x200));
++                }
++    }else{
++        switch (offset) {
++            case 0x400: //pio enable register
++                s->pioc_psr = s->pioc_psr|value; //der value wird ins pio status register eingetragen
++                break;
++            case 0x404: //pio disable register
++                s->pioc_psr = s->pioc_psr&(~value); //der value wird bitwise negiert und mit psr verunded
++                break;
++            case 0x410: //output enable register
++                s->pioc_osr = s->pioc_osr|value;
++                break;
++            case 0x414: //output disable register
++                s->pioc_osr = s->pioc_psr&(~value);
++                break;
++            case 0x430: //set output data register
++                s->pioc_odsr = s->pioc_odsr|value;
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<0)) {
++                    trace_at91pio_led((char*)"red", (char*)"on");
++                }
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                    trace_at91pio_led((char*)"green", (char*)"on");
++                }
++                break;
++            case 0x434: //clear output data register
++                s->pioc_odsr = s->pioc_odsr&(~value);
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<0)) {
++                    trace_at91pio_led((char*)"red", (char*)"off");
++                }
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                    trace_at91pio_led((char*)"green", (char*)"off");
++                }
++                break;
++            case 0x470: //TODO Micha? Sind das Lampen? Pio ASR
++                break;
++            default:
++                fprintf(stderr, "PIO C Write: Bad offset %x\n", (int)(offset-0x400));
++            }
++    }
++            pioc_ctrl=(s->pioc_odsr & s->pioc_osr & s->pioc_psr);
++            piob_ctrl=(s->piob_odsr & s->piob_osr & s->piob_psr);
++
++            //TODO: Nur wenn wirklich etwas neugezeichnet werden soll
++            if(pio_telnet){
++                // Clear Telnet Display
++                qemu_chr_fe_printf(char_kbs->be,"\033[2J\033[1;1H");
++
++                /**
++                 * LED CONTROL
++                 */
++                char yellow_led[]="\033[1;43m\033[1;30m \033[0m";
++                if((piob_ctrl&0x8000000)!=0x8000000){
++                    strcpy(yellow_led, "\033[1;40m\033[1;33m_\033[0m");
++                }
++
++                char green_led[]="\033[1;42m\033[1;30m \033[0m";
++                if((pioc_ctrl&2)!=2){
++                    strcpy(green_led, "\033[1;40m\033[1;32m_\033[0m");
++                }
++
++                char red_led[]="\033[1;41m\033[1;30m \033[0m";
++                if((pioc_ctrl&1)!=1){
++                    strcpy(red_led, "\033[1;40m\033[1;31m_\033[0m");
++                }
++                qemu_chr_fe_printf(char_kbs->be,"\r\nLED: %s%s%s",yellow_led, green_led, red_led);
++
++                /**
++                 * DISPLAY
++                 */
++
++                qemu_chr_fe_printf(char_kbs->be,"\r\n*** DISPLAY ****\r\n");
++                int row_starts[]={0,64,16,80};
++                for(i=0;i<4;i++){
++                    /*for(j=0;j<16;j++){
++                        qemu_chr_fe_printf(char_kbs->be,"%c",s->display[j+row_starts[i]]);
++                    }*/
++                    qemu_chr_fe_write(char_kbs->be,&(s->display[row_starts[i]]),16);
++                    qemu_chr_fe_printf(char_kbs->be,"\r\n");
++                }
++                qemu_chr_fe_printf(char_kbs->be,"*END OF DISPLAY*\r\n");
++            }
++}
++
++
++static const MemoryRegionOps at91pio_ops = {
++    .read = at91pio_read,
++    .write = at91pio_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static const VMStateDescription vmstate_at91pio = {
++    .name = "at91pio",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .minimum_version_id_old = 1,
++    .fields      = (VMStateField[]) {
++        VMSTATE_UINT32(pioa_psr, at91pio_state),
++        VMSTATE_UINT32(pioa_osr, at91pio_state),
++        VMSTATE_UINT32(pioa_odsr, at91pio_state),
++        VMSTATE_UINT32(piob_psr, at91pio_state),
++        VMSTATE_UINT32(piob_osr, at91pio_state),
++        VMSTATE_UINT32(piob_odsr, at91pio_state),
++        VMSTATE_UINT32(pioc_psr, at91pio_state),
++        VMSTATE_UINT32(pioc_osr, at91pio_state),
++        VMSTATE_UINT32(pioc_odsr, at91pio_state),
++        VMSTATE_UINT32(display_pos, at91pio_state),
++        VMSTATE_UINT8_ARRAY(display, at91pio_state, 128),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void at91pio_init(Object *obj)
++{
++    at91pio_state *s = AT91PIO(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->iomem, obj, &at91pio_ops, s, "at91pio", 0x5FF);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++
++    for (int i=0; i<128; i++){
++        s->display[i]='\0';
++    }
++    s->display_pos=0;
++    //Telnet-Client for LCD and LED Output. Port 44444
++    if(pio_telnet!=0){
++        char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server", NULL);
++    }
++}
++
++static void at91pio_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->vmsd = &vmstate_at91pio;
++}
++
++static const TypeInfo at91pio_info = {
++    .name          = TYPE_AT91PIO,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91pio_state),
++    .instance_init = at91pio_init,
++    .class_init    = at91pio_class_init,
++};
++
++static void at91pio_register_types(void)
++{
++    //Achtung! Hier können auch mehrere verschiedene TypeInfos angegeben werden!
++    type_register_static(&at91pio_info);
++}
++
++
++
++type_init(at91pio_register_types)
+diff --git a/hw/gpio/trace-events b/hw/gpio/trace-events
+index c1271fdfb2..756e10bbb4 100644
+--- a/hw/gpio/trace-events
++++ b/hw/gpio/trace-events
+@@ -5,3 +5,7 @@ nrf51_gpio_read(uint64_t offset, uint64_t r) "offset 0x%" PRIx64 " value 0x%" PR
+ nrf51_gpio_write(uint64_t offset, uint64_t value) "offset 0x%" PRIx64 " value 0x%" PRIx64
+ nrf51_gpio_set(int64_t line, int64_t value) "line %" PRIi64 " value %" PRIi64
+ nrf51_gpio_update_output_irq(int64_t line, int64_t value) "line %" PRIi64 " value %" PRIi64
++
++# at91pio.c
++at91pio_led(char *name, char *value) "LED \"%s\" set to \"%s\""
++at91pio_setreg(int offset, uint64_t value) "MMIO reg 0x%x set to value 0x%" PRIx64
+diff --git a/hw/intc/Makefile.objs b/hw/intc/Makefile.objs
+index f726d87532..ad178f9056 100644
+--- a/hw/intc/Makefile.objs
++++ b/hw/intc/Makefile.objs
+@@ -49,3 +49,4 @@ obj-$(CONFIG_ARM_GIC) += arm_gicv3_cpuif.o
+ obj-$(CONFIG_MIPS_CPS) += mips_gic.o
+ obj-$(CONFIG_NIOS2) += nios2_iic.o
+ obj-$(CONFIG_OMPIC) += ompic.o
++obj-$(CONFIG_PORTUX) += at91aic.o at91_intor.o
+diff --git a/hw/intc/at91_intor.c b/hw/intc/at91_intor.c
+new file mode 100644
+index 0000000000..3f309eaa06
+--- /dev/null
++++ b/hw/intc/at91_intor.c
+@@ -0,0 +1,102 @@
++/*
++ * AT91 Interrupt Logic OR
++ *
++ * Copyright (c) 2009 Filip Navara
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++
++#define TYPE_AT91_INTOR "at91_intor"
++#define AT91_INTOR(obj) OBJECT_CHECK(at91_intor_state, (obj), TYPE_AT91_INTOR)
++
++typedef struct {
++    SysBusDevice busdev;
++    qemu_irq parent_irq;
++    uint32_t sources;
++} at91_intor_state;
++
++static void at91_intor_set_irq(void *opaque, int irq, int level)
++{
++    at91_intor_state *s = opaque;
++
++    if (level) {
++        s->sources |= 1 << irq;
++    } else {
++        s->sources &= ~(1 << irq);
++    }
++    qemu_set_irq(s->parent_irq, !!s->sources);
++}
++
++static void at91_intor_reset(DeviceState *dev)
++{
++    at91_intor_state *s = AT91_INTOR(dev);
++
++    s->sources = 0;
++}
++
++static void at91_intor_init(Object *obj)
++{
++    DeviceState *dev = DEVICE(obj);
++    at91_intor_state *s = AT91_INTOR(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    qdev_init_gpio_in(dev, at91_intor_set_irq, 32);
++    sysbus_init_irq(sbd, &s->parent_irq);
++
++    at91_intor_reset(dev);    // FIXME: Is this necessary?
++}
++
++static const VMStateDescription vmstate_at91_intor = {
++    .name = "at91_intor",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32(sources, at91_intor_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void at91_intor_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->user_creatable = false; /* FIXME explain why */
++    dc->reset = at91_intor_reset;
++    dc->vmsd = &vmstate_at91_intor;
++}
++
++static const TypeInfo at91_intor_info = {
++    .name = TYPE_AT91_INTOR,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91_intor_state),
++    .instance_init = at91_intor_init,
++    .class_init = at91_intor_class_init,
++};
++
++static void at91_intor_register_types(void)
++{
++    type_register_static(&at91_intor_info);
++}
++
++type_init(at91_intor_register_types)
+diff --git a/hw/intc/at91aic.c b/hw/intc/at91aic.c
+new file mode 100644
+index 0000000000..504483f022
+--- /dev/null
++++ b/hw/intc/at91aic.c
+@@ -0,0 +1,386 @@
++/*
++ * Atmel AT91SAM7XC Advanced Interrupt Controller emulation.
++ *
++ * Copyright (c) 2012 René Sechting
++ * Copyright (c) 2009 Daniel van Gerpen
++ * Copyright (c) 2006 Pekka Nikander
++ *
++ * Ported to AT91SAM7XC by Daniel van Gerpen based on Pekka Nikander's code.
++ * Written by Pekka Nikander based on Paul Brook's earlied code
++ *
++ * This code is licenced under the GPL.
++ */
++
++#include "qemu/osdep.h"
++#include "hw/irq.h"
++#include "migration/vmstate.h"
++#include <stdio.h>
++#include <stddef.h>
++
++#include "hw/sysbus.h"
++
++
++#define TYPE_AT91AIC "at91aic"
++#define AT91AIC(obj) OBJECT_CHECK(at91aic_state, (obj), TYPE_AT91AIC)
++
++typedef struct {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    qemu_irq irq;
++    qemu_irq fiq;
++    uint32_t smr[32];
++    uint32_t svr[32];
++    uint32_t isr[8];
++    int32_t isr_prio;
++    uint32_t levels;
++    uint32_t edges;
++    uint32_t st_edge;
++    uint32_t st_positive;
++    uint32_t ipr;
++    uint32_t imr;
++    uint32_t cisr;
++    uint32_t spu;
++    uint32_t dcr;
++} at91aic_state;
++
++static const VMStateDescription vmstate_at91aic = {
++    .name = "at91aic",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32_ARRAY(smr, at91aic_state, 32),
++        VMSTATE_UINT32_ARRAY(svr, at91aic_state, 32),
++        VMSTATE_UINT32_ARRAY(isr, at91aic_state, 8),
++        VMSTATE_INT32(isr_prio, at91aic_state),
++        VMSTATE_UINT32(levels, at91aic_state),
++        VMSTATE_UINT32(edges, at91aic_state),
++        VMSTATE_UINT32(st_edge, at91aic_state),
++        VMSTATE_UINT32(st_positive, at91aic_state),
++        VMSTATE_UINT32(ipr, at91aic_state),
++        VMSTATE_UINT32(imr, at91aic_state),
++        VMSTATE_UINT32(cisr, at91aic_state),
++        VMSTATE_UINT32(spu, at91aic_state),
++        VMSTATE_UINT32(dcr, at91aic_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++#define AIC_SMR0    0x000
++#define AIC_SMR31   0x07c
++#define AIC_SVR0    0x080
++#define AIC_SVR31   0x0fc
++#define AIC_IVR     0x100
++#define AIC_FVR     0x104
++#define AIC_ISR     0x108
++#define AIC_IPR     0x10c
++#define AIC_IMR     0x110
++#define AIC_CISR    0x114
++#define AIC_IECR    0x120
++#define AIC_IDCR    0x124
++#define AIC_ICCR    0x128
++#define AIC_ISCR    0x12c
++#define AIC_EOICR   0x130
++#define AIC_SPU     0x134
++#define AIC_DCR     0x138
++
++#define AIC_SMR_MASK    0b01100111
++#define ST_EDGE         (1 << 5)
++#define ST_POSITIVE     (1 << 6)
++#define PRIOR_MASK      0b00000111
++
++#define NFIQ            (1 << 0)
++#define NIRQ            (1 << 1)
++
++#define AIC_DCR_MASK    0x03
++#define PROT            (1 << 0)
++#define GMSK            (1 << 1)
++
++static inline int priority_of(at91aic_state *s, int irq)
++{
++    if (irq == 0) {
++        return -1;
++    }
++    return s->smr[irq] & PRIOR_MASK;
++}
++
++static int highest_active_irq(at91aic_state *s)
++{
++    int i, irq = 0;
++    int pending = s->ipr & s->imr;
++    int prio = -1;
++
++    for (i = 1; i < 32; i++) {
++        if (!(pending & (1 << i))) {
++            continue;
++        }
++        if (prio >= priority_of(s, i)) {
++            continue;
++        }
++        irq = i;
++        prio = priority_of(s, i);
++    }
++    return irq;
++}
++
++
++/* Update interrupts.  */
++static void at91aic_update(at91aic_state *s)
++{
++    /* Update Pending IRQs */
++    uint32_t t = ~(s->levels ^ s->st_positive);
++    s->ipr = (t & ~s->st_edge) | (s->edges & s->st_edge);
++
++    /* Update CISR */
++    int irq = highest_active_irq(s);
++    int prio = priority_of(s, irq);
++
++    if (prio > s->isr_prio) {
++        s->cisr |= NIRQ;
++    } else {
++        s->cisr &= ~NIRQ;
++    }
++
++    if (s->ipr & s->imr & NFIQ) {
++        s->cisr |= NFIQ;
++    } else {
++        s->cisr &= ~NFIQ;
++    }
++    if (s->dcr & GMSK) {
++        s->cisr = 0;
++    }
++
++    /* Update IRQ-Lines to CPU */
++    qemu_set_irq(s->fiq, s->cisr & NFIQ);
++    qemu_set_irq(s->irq, s->cisr & NIRQ);
++}
++
++static void at91aic_signal_eoi(at91aic_state *s)
++{
++    if (s->isr_prio == -1) {
++        fprintf(stderr, "at91aic_signal_eoi: write to AIC_EOICR without corresponding read from AIC_IVR\n");
++        return;
++    }
++    s->isr[s->isr_prio] = 0;
++    while (s->isr[s->isr_prio] == 0) {
++        s->isr_prio--;
++        if (s->isr_prio == -1) {
++            break;
++        }
++    }
++    at91aic_update(s);
++}
++
++static uint64_t at91aic_get_ivr(at91aic_state *s, int write)
++{
++    int irq = highest_active_irq(s);
++    int prio = priority_of(s, irq);
++
++    if (prio > s->isr_prio) {
++        /* enabled active IRQ with higher priority */
++        if (write || !(s->dcr & PROT)) {
++            s->isr_prio = prio;
++            s->isr[s->isr_prio] = irq;
++            s->edges &= ~(1 << irq);
++            at91aic_update(s);
++        }
++        return s->svr[irq];
++    } else {
++        /* spurious IRQ */
++        if (s->isr_prio == 7) {
++            fprintf(stderr, "at91aic_get_ivr: AIC_IVR read while already at max priority\n");
++        }
++        if (write || !(s->dcr & PROT)) {
++            s->isr_prio = 7;
++            s->isr[s->isr_prio] = 0;
++        }
++        return s->spu;
++    }
++}
++
++static uint64_t at91aic_read(void *opaque, hwaddr offset, unsigned size)
++{
++    at91aic_state *s = opaque;
++
++    /* Access to SMR or SVR array */
++    if (/*offset >= AIC_SMR0 &&*/ offset <= AIC_SMR31 && (offset & 3) == 0) {
++        return s->smr[(offset - AIC_SMR0) >> 2];
++    }
++    if (offset >= AIC_SVR0 && offset <= AIC_SVR31 && (offset & 3) == 0) {
++        return s->svr[(offset - AIC_SVR0) >> 2];
++    }
++
++    /* Other registers */
++    switch (offset) {
++    case AIC_IVR: // Interrupt Vector Register
++        return at91aic_get_ivr(s, false);
++    case AIC_FVR: // Fast Interrupt Vector Register
++        return s->svr[0];
++    case AIC_ISR: // Interrupt Status Register
++        return s->isr_prio >= 0 ? s->isr[s->isr_prio] : 0;
++    case AIC_IPR: // Interrupt Pending Register
++        return s->ipr;
++    case AIC_IMR: // Interrupt Mask Register
++        return s->imr;
++    case AIC_CISR: // Core Interrupt Status Register
++        return s->cisr;
++    case AIC_SPU: // Spurious Interrupt Vector Register
++        return s->spu;
++    case AIC_DCR: // Debug Control Register
++        return s->dcr;
++    default:
++        fprintf(stderr, "at91aic_read: Bad offset %x (returning zero)\n", (int)offset);
++        return 0;
++    }
++}
++
++static void at91aic_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
++{
++    at91aic_state *s = opaque;
++
++    /* Access to SMR or SVR array */
++    if (/*offset >= AIC_SMR0 &&*/ offset <= AIC_SMR31 && (offset & 3) == 0) {
++        int irq = (offset - AIC_SMR0) >> 2;
++
++        s->smr[irq] = val & AIC_SMR_MASK;
++
++        if (val & ST_EDGE) {
++            s->st_edge |= 1 << irq;
++        } else {
++            s->st_edge &= ~(1 << irq);
++        }
++        if (val & ST_POSITIVE || irq == 1) {
++            s->st_positive |= 1 << irq;
++            s->smr[irq] |= ST_POSITIVE;
++        } else {
++            s->st_positive &= ~(1 << irq);
++        }
++
++        at91aic_update(s);
++        return;
++    } else if (offset >= AIC_SVR0 && offset <= AIC_SVR31 && (offset & 3) == 0) {
++        s->svr[(offset - AIC_SVR0) >> 2] = val;
++        return;
++    }
++
++    /* Other registers */
++    switch (offset) {
++    case AIC_IVR: // Interrupt Vector Register
++        at91aic_get_ivr(s, true);
++        break;
++    case AIC_IECR: // Interrupt Enable Command Register
++        s->imr |= val;
++        at91aic_update(s);
++        break;
++    case AIC_IDCR: // Interrupt Disable Command Register
++        s->imr &= ~val;
++        at91aic_update(s);
++        break;
++    case AIC_ICCR: // Interrupt Clear Command Register
++        s->edges &= ~val;
++        at91aic_update(s);
++        break;
++    case AIC_ISCR: // Interrupt Set Command Register
++        s->edges |= val;
++        at91aic_update(s);
++        break;
++    case AIC_EOICR: // End Of Interrupt Command Register
++        at91aic_signal_eoi(s);
++        break;
++    case AIC_SPU: // Spurious Interrupt Vector Register
++        s->spu = val;
++        break;
++    case AIC_DCR: // Debug Control Register
++        s->dcr = val & AIC_DCR_MASK;
++        at91aic_update(s);
++        break;
++    default:
++        fprintf(stderr, "at91aic_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static void at91aic_reset(DeviceState *dev) {
++    at91aic_state *s = AT91AIC(dev);
++    int i;
++    for (i = 0; i < 32; i++) {
++      s->smr[i] = 0;
++      s->svr[i] = 0;
++    }
++    s->smr[1] |= ST_POSITIVE;
++    for (i = 0; i < 8; i++) {
++        s->isr[i] = 0;
++    }
++    s->isr_prio = -1;
++    /* levels need no reset */
++    s->edges = 0;
++    s->st_edge = 0;
++    s->st_positive = 2;
++    s->imr = 0;
++    s->spu = 0;
++    s->dcr = 0;
++
++    /* Sets ipr, cisr */
++    at91aic_update(s);
++}
++
++static const MemoryRegionOps at91aic_ops = {
++    .read = at91aic_read,
++    .write = at91aic_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91aic_set_irq(void *opaque, int irq, int level) {
++    at91aic_state *s = opaque;
++    int old_levels = s->levels;
++
++    /* Store current level of irq */
++    if (level) {
++        s->levels |= 1 << irq;
++    } else {
++        s->levels &= ~(1 << irq);
++    }
++
++    /* Detect edge */
++    s->edges |= (old_levels ^ s->levels) & (s->levels ^ ~s->st_positive);
++
++    at91aic_update(s);
++}
++
++static void at91aic_init(Object *obj)
++{
++    DeviceState *dev = DEVICE(obj);
++    at91aic_state *s = AT91AIC(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++    memory_region_init_io(&s->iomem, obj, &at91aic_ops, s, "at91aic", 0x1FF);
++    sysbus_init_mmio(sbd, &s->iomem);
++    qdev_init_gpio_in(dev, at91aic_set_irq, 32);
++    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_irq(sbd, &s->fiq);
++
++    at91aic_reset(dev);
++}
++
++static void at91aic_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->user_creatable = false;
++    dc->reset = at91aic_reset;
++    dc->vmsd = &vmstate_at91aic;
++}
++
++static const TypeInfo at91aic_info = {
++    .name = TYPE_AT91AIC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91aic_state),
++    .instance_init = at91aic_init,
++    .class_init = at91aic_class_init,
++};
++
++static void at91aic_register_types(void)
++{
++    type_register_static(&at91aic_info);
++}
++
++type_init(at91aic_register_types)
+diff --git a/hw/net/Kconfig b/hw/net/Kconfig
+index 3856417d42..f19be52844 100644
+--- a/hw/net/Kconfig
++++ b/hw/net/Kconfig
+@@ -131,3 +131,9 @@ config CAN_SJA1000
+     default y if PCI_DEVICES
+     depends on PCI
+     select CAN_BUS
++
++config AT91EMAC
++    bool
++
++config AT91G20EMAC
++    bool
+diff --git a/hw/net/Makefile.objs b/hw/net/Makefile.objs
+index 7907d2c199..c3e1e85144 100644
+--- a/hw/net/Makefile.objs
++++ b/hw/net/Makefile.objs
+@@ -32,6 +32,9 @@ common-obj-$(CONFIG_SUNHME) += sunhme.o
+ common-obj-$(CONFIG_FTGMAC100) += ftgmac100.o
+ common-obj-$(CONFIG_SUNGEM) += sungem.o
+ 
++common-obj-$(CONFIG_AT91EMAC) += at91emac.o
++common-obj-$(CONFIG_AT91G20EMAC) += at91g20emac.o
++
+ obj-$(CONFIG_ETRAXFS) += etraxfs_eth.o
+ obj-$(CONFIG_COLDFIRE) += mcf_fec.o
+ obj-$(CONFIG_MILKYMIST) += milkymist-minimac2.o
+diff --git a/hw/net/at91emac.c b/hw/net/at91emac.c
+new file mode 100644
+index 0000000000..68db6f296e
+--- /dev/null
++++ b/hw/net/at91emac.c
+@@ -0,0 +1,744 @@
++/*
++ * AT91 Ethernet MAC (for AT91RM9200)
++ *
++ * Copyright (c) 2012 Daniel Röhrig, René Sechting
++ * Copyright (c) 2007, 2009 Filip Navara
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++/*
++ * WARNING!
++ * This is written for the AT91RM9200 which has a different behavior than all
++ * the other (or most, we don't know) AT91-boards. So have a look in your documentation.
++ */
++
++/*
++ * TODO:
++ * PHY read/write (MII/RMII), statistics, VLAN, hash addressing, jumbo frame
++ * sending, ...
++ */
++
++#include "qemu/osdep.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "migration/vmstate.h"
++#include "net/net.h"
++#include "hw/net/at91emac.h"
++
++/* #define DEBUG_EMAC */
++
++#define EMAC_SIZE        0x4000
++
++#define EMAC_CTL         0x00 /* Control Register */
++#define EMAC_CFG         0x04
++#define EMAC_SR          0x08 /* Status Register */
++#define EMAC_TAR         0x0c /* Transmit Address Register */
++#define EMAC_TCR         0x10 /* Transmit Control Register */
++#define EMAC_TSR         0x14 /* Transmit Status Register */
++#define EMAC_RBQP        0x18 /* Receive Buffer Queue Pointer */
++#define EMAC_TBQP        0x1c /* Transmit Buffer Queue Pointer */
++#define EMAC_RSR         0x20 /* Receive Status Register */
++#define EMAC_ISR         0x24 /* Interrupt Status Register */
++#define EMAC_IER         0x28 /* Interrupt Enable Register */
++#define EMAC_IDR         0x2c /* Interrupt Disable Register */
++#define EMAC_IMR         0x30 /* Interrupt Mask Register WARNING! 1 means OFF*/
++#define EMAC_MAN         0x34 /* PHY Maintenance Register */
++#define EMAC_SA1H         0x9C /* High Part of MAC-Adress */
++#define EMAC_SA1L         0x98 /* Low Part of MAC-Adress */
++#define EMAC_SA2H         0xA4 /* High Part of MAC-Address */
++#define EMAC_SA2L         0xA0 /* Low Part of MAC-Address */
++
++#define PHY_CTRL         0x00 /* Control Register */
++#define PHY_STATUS       0x01 /* Status Regiser */
++#define PHY_ID1          0x02 /* Phy Id Reg (word 1) */
++#define PHY_ID2          0x03 /* Phy Id Reg (word 2) */
++#define PHY_AUTONEG_ADV  0x04 /* Autoneg Advertisement */
++#define PHY_LP_ABILITY   0x05 /* Link Partner Ability (Base Page) */
++#define PHY_AUTONEG_EXP  0x06 /* Autoneg Expansion Reg */
++#define PHY_NEXT_PAGE_TX 0x07 /* Next Page TX */
++#define PHY_LP_NEXT_PAGE 0x08 /* Link Partner Next Page */
++#define PHY_1000T_CTRL   0x09 /* 1000Base-T Control Reg */
++#define PHY_1000T_STATUS 0x0a /* 1000Base-T Status Reg */
++#define PHY_EXT_STATUS   0x0f /* Extended Status Reg */
++
++#define CTL_LB           0x01 /* Loopback */
++#define CTL_LLB          0x02 /* Loopback local */
++#define CTL_RE           0x04 /* Receive enable */
++#define CTL_TE           0x08 /* Transmit enable */
++#define CTL_MPE          0x10 /* Management port enable */
++#define CTL_CLRSTAT      0x20 /* Clear statistics registers */
++#define CTL_INCSTAT      0x40 /* Increment statistics registers */
++#define CTL_WESTAT       0x80 /* Write enable for statistics registers */
++#define CTL_BP           0x100 /* Back pressure */
++#define CTL_TSTART       0x200 /* Transmit start */
++
++#define CFG_SPD          0x01 /* Speed (100 or 10) */
++#define CFG_FD           0x02 /* Full Duplex */
++#define CFG_JFRAME       0x08 /* Jumbo Frames */
++#define CFG_CAF          0x10 /* Copy All Frames */
++#define CFG_NBC          0x20 /* No Broadcast */
++#define CFG_MTI          0x40 /* Multicast Hash Enable */
++#define CFG_UNI          0x80 /* Unicast Hash Enable */
++#define CFG_BIG          0x100 /* Receive 1536 byte frames */
++#define CFG_CLK          0xC00
++#define CFG_CLK_HCLK_8   0 /* HCLK divided by 8 */
++#define CFG_CLK_HCLK_16  0x400 /* HCLK divided by 16 */
++#define CFG_CLK_HCLK_32  0x800 /* HCLK divided by 32 */
++#define CFG_CLK_HCLK_64  0xc00 /* HCLK divided by 64 */
++#define CFG_RTY          0x1000 /* Retry Test */
++#define CFG_PAE          0x2000 /* Pause Enable */
++#define CFG_RBOF         0xC000 /* Receive Buffer Offset */
++#define CFG_RLCE         0x10000 /* Receive Length field Checking Enable */
++#define CFG_DRFCS        0x20000 /* Discard Receive FCS */
++#define CFG_EFRHD        0x40000 /* Enable Frame Receive in Half-Duplex mode */
++#define CFG_IRXFCS       0x80000 /* Ignore RX FCS */
++
++#define SR_IDLE          0x04
++
++#define TSR_UBR          0x01 /* Used Bit Read */
++#define TSR_COL          0x02 /* Collision Occured */
++#define TSR_RLE          0x04 /* Retry Limit Exceeded */
++#define TSR_TGO          0x08 /* Transmit Go */
++#define TSR_BEX          0x10 /* Buffers exhausted mid-frame */
++#define TSR_COMP         0x20 /* Transmit Complete */
++#define TSR_UND          0x40 /* Transmit Underrun */
++
++#define ISR_MFD          0x01 /* Management Frame Done */
++#define ISR_RCOMP        0x02 /* Receive Completed */
++#define ISR_RBNA         0x04 /* Receive Buffer Not Available */
++#define ISR_TXUBR        0x08 /* Transmit Used Bit Read */
++#define ISR_TUND         0x10 /* Transmit Buffer Underrun */
++#define ISR_RLE          0x20 /* Retry Limit Exceeded */
++#define ISR_TXERR        0x40 /* Transmit Error */
++#define ISR_TCOMP        0x80 /* Transmit Complete */
++#define ISR_ROVR         0x400 /* Receive Overrun */
++
++#define TXDESC_USED      0x80000000
++#define TXDESC_WRAP      0x40000000
++#define TXDESC_NOCRC     0x10000
++#define TXDESC_LAST      0x8000
++
++#define CRCPOLY_LE 0xedb88320
++
++#define TYPE_AT91EMAC "at91emac"
++#define AT91EMAC(obj) OBJECT_CHECK(at91emac_state, (obj), TYPE_AT91EMAC)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    qemu_irq irq;
++    MemoryRegion iomem;
++    NICState *nic;
++    NICConf conf;
++    uint32_t ctl;
++    uint32_t cfg;
++    uint32_t sr;
++    uint32_t tar;
++    uint32_t tcr;
++    uint32_t tsr;
++    uint32_t rbqp;
++    uint32_t rbqp_base;
++    uint32_t tbqp;
++    uint32_t tbqp_base;
++    uint32_t rsr;
++    uint32_t isr;
++    uint32_t imr;
++    uint32_t man;
++
++    uint32_t hsl;
++    uint16_t hsh;
++    uint32_t sa1l;
++    uint16_t sa1h;
++    uint32_t sa2l;
++    uint16_t sa2h;
++    uint32_t sa3l;
++    uint16_t sa3h;
++    uint32_t sa4l;
++    uint16_t sa4h;
++    uint8_t sa_valid;
++} at91emac_state;
++
++static const VMStateDescription vmstate_at91emac = {
++    .name = "at91emac",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields      = (VMStateField []) {
++        VMSTATE_UINT32(ctl, at91emac_state),
++        VMSTATE_UINT32(cfg, at91emac_state),
++        VMSTATE_UINT32(sr, at91emac_state),
++        VMSTATE_UINT32(tar, at91emac_state),
++        VMSTATE_UINT32(tcr, at91emac_state),
++        VMSTATE_UINT32(tsr, at91emac_state),
++        VMSTATE_UINT32(rbqp, at91emac_state),
++        VMSTATE_UINT32(rbqp_base, at91emac_state),
++        VMSTATE_UINT32(tbqp, at91emac_state),
++        VMSTATE_UINT32(tbqp_base, at91emac_state),
++        VMSTATE_UINT32(rsr, at91emac_state),
++        VMSTATE_UINT32(isr, at91emac_state),
++        VMSTATE_UINT32(imr, at91emac_state),
++        VMSTATE_UINT32(man, at91emac_state),
++        VMSTATE_UINT32(hsl, at91emac_state),
++        VMSTATE_UINT16(hsh, at91emac_state),
++        VMSTATE_UINT32(sa1l, at91emac_state),
++        VMSTATE_UINT16(sa1h, at91emac_state),
++        VMSTATE_UINT32(sa2l, at91emac_state),
++        VMSTATE_UINT16(sa2h, at91emac_state),
++        VMSTATE_UINT32(sa3l, at91emac_state),
++        VMSTATE_UINT16(sa3h, at91emac_state),
++        VMSTATE_UINT32(sa4l, at91emac_state),
++        VMSTATE_UINT16(sa4h, at91emac_state),
++        VMSTATE_UINT8(sa_valid, at91emac_state),
++    }
++};
++
++static uint32_t crc32_le(uint32_t crc, unsigned char const *p, size_t len)
++{
++    int i;
++    while (len--) {
++        crc ^= *p++;
++        for (i = 0; i < 8; i++)
++            crc = (crc >> 1) ^ ((crc & 1) ? CRCPOLY_LE : 0);
++    }
++    return crc;
++}
++
++static uint32_t address_match(at91emac_state *s, const uint8_t *buf)
++{
++    uint32_t addrl = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
++    uint16_t addrh = (buf[5] << 8) | buf[4];
++
++    if ((s->sa_valid & 1) && addrl == s->sa1l && addrh == s->sa1h)
++        return (1 << 26);
++    if ((s->sa_valid & 2) && addrl == s->sa2l && addrh == s->sa2h)
++        return (1 << 25);
++    if ((s->sa_valid & 4) && addrl == s->sa3l && addrh == s->sa3h)
++        return (1 << 24);
++    if ((s->sa_valid & 8) && addrl == s->sa4l && addrh == s->sa4h)
++        return (1 << 23);
++    if (!(s->cfg & CFG_NBC) && addrl == ~0 && addrh == 0xffff)
++        return (1 << 31);
++    /* TODO: hash addressing */
++
++    return 0;
++}
++
++static int at91emac_can_receive(NetClientState *nc)
++{
++    at91emac_state *s = qemu_get_nic_opaque(nc);
++    return !!(s->ctl & CTL_RE);
++}
++
++static ssize_t at91emac_receive(NetClientState *nc, const uint8_t *buf, size_t size)
++{
++    at91emac_state *s = qemu_get_nic_opaque(nc);
++    uint32_t rx_desc;
++    uint32_t buffer_addr;
++    uint32_t status_len;
++    uint32_t status_len_le;
++    uint8_t segment_size;
++    size_t saved_size;
++    int wrap;
++
++    if (!(s->ctl & CTL_RE))
++        return -1;
++
++    /* Reject frame with invalid size */
++    if (size < 6 || size > 10240) {
++        return size;
++    }
++    if ((size > 1536 && !(s->cfg & CFG_JFRAME)) ||
++        (size > 1518 && !(s->cfg & CFG_BIG))) {
++        return size;
++    }
++
++    status_len = address_match(s, buf);
++
++    /* Either the address has to match or promiscuous mode must be enabled */
++    if (status_len == 0 && !(s->cfg & CFG_CAF)) {
++        return size;
++    }
++
++    /* TODO: VLAN, FCS checks (CFG_DRFCS, CFG_IRXFCS) */
++
++    /* Start of frame */
++    status_len = 1 << 14;
++    saved_size = size;
++
++    do {
++        cpu_physical_memory_read(s->rbqp, (uint8_t *)&rx_desc, sizeof(uint32_t));
++        rx_desc = le32_to_cpu(rx_desc);
++
++        if (rx_desc & 1) /* Ownership bit */
++        {
++            s->rsr |= 1; /* Buffer Not Available */
++            s->isr |= ISR_RBNA;
++            if (!(s->imr & ISR_RBNA)) {
++                printf("Receive Buffer full IRQ\n");
++                fflush(0);
++                qemu_set_irq(s->irq, 1);
++            }
++            return size;
++        } else {
++            wrap = rx_desc & 2;
++            buffer_addr = rx_desc & ~3; /* Mask out the WRAP and OWNERSHIP bits */
++
++            segment_size = size <= 128 ? size : 128;
++            cpu_physical_memory_write(buffer_addr, buf, saved_size);
++            size -= segment_size;
++            buf += segment_size;
++
++            if (size == 0)
++                status_len |= (1 << 15) | saved_size;
++            status_len_le = cpu_to_le32(status_len);
++            cpu_physical_memory_write(s->rbqp + 4, (uint8_t *)&status_len_le, sizeof(uint32_t));
++            status_len &= ~(1 << 14);
++
++            /* Set owner bit to CPU */
++            rx_desc |= 1;
++            rx_desc = cpu_to_le32(rx_desc);
++            cpu_physical_memory_write(s->rbqp, (uint8_t *)&rx_desc, sizeof(uint32_t));
++
++            if (wrap || s->rbqp - s->rbqp_base == 8192) {
++                s->rbqp = s->rbqp_base;
++            } else {
++                s->rbqp = s->rbqp + 8;
++            }
++        }
++    } while (size > 0);
++
++    /* Frame Received */
++    s->rsr |= 2;
++    s->isr |= ISR_RCOMP;
++    if (!(s->imr & ISR_RCOMP)) {
++
++        qemu_set_irq(s->irq, 1);
++
++    }
++
++    // returned value should be != 0 otherwise we disable receiving completely
++    return saved_size;
++}
++
++static void at91emac_send(at91emac_state *s)
++{
++    uint32_t crc;
++    uint8_t buf[2048 + sizeof(crc)];
++    uint32_t size;
++
++    size = s->tcr & 0x7ff;
++
++    cpu_physical_memory_read(s->tar, buf, size);
++
++    if (!(s->tcr & (1 << 15))) { /* No CRC bit */
++        /* Pad the frame to minimal length */
++        if (size < 60) {
++            memset(buf + size, 0, 60 - size);
++            size = 60;
++        }
++
++        /* Add CRC */
++        crc = cpu_to_le32(~crc32_le(~0, buf, size));
++        memcpy(buf + size, &crc, sizeof(crc));
++        size += 4;
++    }
++
++    if (s->ctl & CTL_LLB) {
++        at91emac_receive(qemu_get_queue(s->nic), buf, size);
++    } else {
++        qemu_send_packet(qemu_get_queue(s->nic), buf, size);
++    }
++
++    /* Transfer Complete */
++    s->tsr |= TSR_COMP;
++    s->isr |= ISR_TCOMP;
++    if (!(s->imr & ISR_TCOMP)) {
++        qemu_set_irq(s->irq, 1);
++    }
++}
++
++static void at91emac_send_queue(at91emac_state *s)
++{
++    uint32_t crc;
++    uint8_t buf[2048 + sizeof(crc)];
++    uint32_t buffer_addr;
++    uint32_t tx_desc;
++    uint32_t frame_size;
++    int used;
++    int wrap;
++
++    do {
++        cpu_physical_memory_read(s->tbqp, (uint8_t *)&buffer_addr, sizeof(uint32_t));
++        cpu_physical_memory_read(s->tbqp + 4, (uint8_t *)&tx_desc, sizeof(uint32_t));
++        buffer_addr = le32_to_cpu(buffer_addr);
++        tx_desc = le32_to_cpu(tx_desc);
++
++        used = !!(tx_desc & TXDESC_USED);
++        wrap = !!(tx_desc & TXDESC_WRAP);
++
++        if (!used) {
++            frame_size = tx_desc & 0x7ff;
++            cpu_physical_memory_read(le32_to_cpu(buffer_addr), buf, frame_size);
++
++            /* TODO: Jumbo frame - !(tx_desc & TXDESC_LAST) */
++            /* TODO: Pause frame */
++
++            if (!(tx_desc & TXDESC_NOCRC)) {
++                /* Pad the frame to minimal length */
++                if (frame_size < 60) {
++                    memset(buf + frame_size, 0, 60 - frame_size);
++                    frame_size = 60;
++                }
++
++                /* Add CRC */
++                crc = cpu_to_le32(~crc32_le(~0, buf, frame_size));
++                memcpy(buf + frame_size, &crc, sizeof(crc));
++                frame_size += 4;
++            }
++
++            if (s->ctl & CTL_LLB) {
++                at91emac_receive(qemu_get_queue(s->nic), buf, frame_size);
++            } else {
++                qemu_send_packet(qemu_get_queue(s->nic), buf, frame_size);
++            }
++
++            /* Set owner bit to CPU */
++            tx_desc |= 1 << 31;
++            tx_desc = cpu_to_le32(tx_desc);
++            cpu_physical_memory_write(s->tbqp + 4, (uint8_t *)&tx_desc, sizeof(uint32_t));
++
++            if (wrap || s->tbqp - s->tbqp_base == 8192) {
++                s->tbqp = s->tbqp_base;
++            } else {
++                s->tbqp = s->tbqp + 8;
++            }
++        }
++    } while (!used);
++
++    /* Transfer Complete */
++    s->tsr |= TSR_COMP;
++    s->isr |= ISR_TCOMP;
++    s->tsr &= ~(1<<3);
++    if (!(s->imr & ISR_TCOMP)) {
++       qemu_set_irq(s->irq, 1);
++    }
++}
++
++static uint16_t at91emac_phy_read(at91emac_state *s, uint8_t reg)
++{
++    switch (reg) {
++        case PHY_ID1:
++            return 0x0181; /* DM9161 */
++        case PHY_ID2:
++            return 0xb8a0;
++        case PHY_STATUS:
++            return
++                (1 << 15) | /* 100BASE-T4 Capable */
++                (1 << 5) | /* Auto-negotion Complete */
++                (1 << 3) | /* Auto Configuration Ability */
++                (1 << 2); /* Link Status */
++        case PHY_AUTONEG_ADV:
++            return (1 << 9) | 1; /* 100BASE-T4, IEEE 802.3 */
++        default:
++            return 0;
++    }
++}
++
++static void at91emac_phy_write(at91emac_state *s, uint8_t reg, uint16_t value)
++{
++}
++
++static uint64_t at91emac_mem_read(void *opaque, hwaddr offset, unsigned size)
++{
++    at91emac_state *s = opaque;
++    uint32_t isr;
++    offset &= EMAC_SIZE - 1;
++
++    switch (offset) {
++    case EMAC_CTL:
++        return s->ctl;
++    case EMAC_CFG:
++        return s->cfg;
++    case EMAC_SR:
++        return s->sr;
++    case EMAC_TAR:
++        return s->tar;
++    case EMAC_TCR:
++        return s->tcr;
++    case EMAC_TSR:
++        return s->tsr;
++    case EMAC_RBQP:
++        return s->rbqp;
++    case EMAC_TBQP:
++        return s->tbqp;
++    case EMAC_RSR:
++        return s->rsr;
++    case EMAC_ISR:
++        isr = s->isr;
++        s->isr = 0;
++        qemu_set_irq(s->irq, 0); //This is important! Do not delete!
++        return isr;
++    case EMAC_IMR:
++        return s->imr;
++    case EMAC_MAN:
++        return s->man;
++    case EMAC_SA1L:
++    return s->sa1l;
++    case EMAC_SA1H:
++    return s->sa1h;
++    case EMAC_SA2H:
++    return s->sa2h;
++    case EMAC_SA2L:
++    return s->sa2l;
++    default:
++    printf("Default?: %lu\n",offset);
++        return 0;
++    }
++}
++
++static void at91emac_mem_write(void *opaque, hwaddr offset,
++                uint64_t value, unsigned size)
++{
++    at91emac_state *s = opaque;
++
++    offset &= EMAC_SIZE - 1;
++    switch (offset) {
++    case EMAC_CTL:
++        s->ctl = value & ~(CTL_CLRSTAT | CTL_INCSTAT);
++        /* TODO: CTL_CLRSTAT, CTL_INCSTAT */
++        if ((value & (CTL_TSTART | CTL_TE)) == (CTL_TSTART | CTL_TE)) {
++            at91emac_send_queue(s);
++        } else if (!(value & CTL_TE)){
++            s->tbqp = s->tbqp_base;
++        }
++        break;
++    case EMAC_CFG:
++        s->cfg = value;
++        break;
++    case EMAC_TAR:
++        s->tar = value;
++        break;
++    case EMAC_TCR: /* RM9200 only */
++        s->tcr = value;
++        if (s->ctl & CTL_TE)
++            at91emac_send(s);
++        break;
++    case EMAC_TSR:
++        s->tsr &= ~value;
++        break;
++    case EMAC_RBQP:
++        s->rbqp_base = s->rbqp = value;
++        break;
++    case EMAC_TBQP:
++        s->tbqp_base = s->tbqp = value;
++        break;
++    case EMAC_RSR:
++        s->rsr &= ~value;
++        break;
++    case EMAC_ISR:
++        s->isr = value;
++        break;
++    case EMAC_IER:
++        s->imr &= ~value;
++        break;
++    case EMAC_IDR:
++        s->imr |= value;
++        break;
++    case EMAC_MAN:
++        /* Check for PHY Address 31 */
++        if (((value >> 23) & 0x1f) == 31) {
++            if ((value & 0x30000000) == 0x20000000) {
++                value &= ~0xffff;
++                value |= at91emac_phy_read(s, (value >> 18) & 0x1f);
++            } else if ((value & 0x30000000) == 0x10000000) {
++                at91emac_phy_write(s, (value >> 18) & 0x1f, value & 0xffff);
++            }
++            /* TODO: Interrupts, checks */
++        }
++        s->sr |= SR_IDLE;
++        s->man = value;
++        break;
++    case 0x90:
++        s->hsl = value;
++        s->sa_valid &= ~16;
++        break;
++    case 0x94:
++        s->hsh = value & 0xffff;
++        s->sa_valid |= 16;
++        break;
++    case 0x98:
++        s->sa1l = value;
++        s->sa_valid &= ~1;
++        break;
++    case 0x9c:
++        s->sa1h = value & 0xffff;
++        s->sa_valid |= 1;
++        break;
++    case 0xa0:
++        s->sa2l = value;
++        s->sa_valid &= ~2;
++        break;
++    case 0xa4:
++        s->sa2h = value & 0xffff;
++        s->sa_valid |= 2;
++        break;
++    case 0xa8:
++        s->sa3l = value;
++        s->sa_valid &= ~4;
++        break;
++    case 0xac:
++        s->sa3h = value & 0xffff;
++        s->sa_valid |= 4;
++        break;
++    case 0xb0:
++        s->sa4l = value;
++        s->sa_valid &= ~8;
++        break;
++    case 0xb4:
++        s->sa4h = value & 0xffff;
++        s->sa_valid |= 8;
++        break;
++    default:
++        return;
++    }
++}
++
++#ifdef DEBUG_EMAC
++static uint64_t at91emac_mem_read_dbg(void *opaque, hwaddr offset, unsigned size)
++{
++    uint64_t value = at91emac_mem_read(opaque, offset);
++    printf("%s offset=%lx val=%lx\n", __func__, offset, value);
++    return value;
++}
++
++static void at91emac_mem_write_dbg(void *opaque, hwaddr offset,
++                uint64_t value, unsigned size)
++{
++    printf("%s offset=%lx val=%lx\n", __func__, offset, value);
++    at91emac_mem_write(opaque, offset, value);
++}
++
++#define at91emac_mem_read at91emac_mem_read_dbg
++#define at91emac_mem_write at91emac_mem_write_dbg
++#endif
++
++static const MemoryRegionOps at91emac_mem_ops = {
++    .read = at91emac_mem_read,
++    .write = at91emac_mem_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91emac_cleanup(NetClientState *nc)
++{
++    at91emac_state *s = qemu_get_nic_opaque(nc);
++    s->nic = NULL;
++}
++
++static NetClientInfo net_at91emac_info = {
++    .type = NET_CLIENT_DRIVER_NIC,
++    .size = sizeof(NICState),
++    .can_receive = at91emac_can_receive,
++    .receive = at91emac_receive,
++    .cleanup = at91emac_cleanup,
++};
++
++static void at91emac_reset(DeviceState *dev)
++{
++    at91emac_state *s = AT91EMAC(dev);
++
++    s->ctl = 0;
++    s->cfg = CFG_CLK_HCLK_32;
++    s->sr = 0;
++    s->tar = 0;
++    s->tcr = 0;
++    s->tsr = 0x18;
++    s->rbqp = 0;
++    s->rbqp_base = 0;
++    s->tbqp = 0;
++    s->tbqp_base = 0;
++    s->rsr = 0;
++    s->isr = 0;
++    s->imr = 0xfff; //(Keine IRQs)
++    s->man = 0;
++    s->hsl = 0;
++    s->hsh = 0;
++    s->sa3l = 0;
++    s->sa3h = 0;
++    s->sa4l = 0;
++    s->sa4h = 0;
++    s->sa_valid = 3;
++}
++
++static Property at91emac_properties[] = {
++    DEFINE_NIC_PROPERTIES(at91emac_state, conf),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++void at91emac_init1(NICInfo *nd, uint32_t base, qemu_irq irq)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    qemu_check_nic_model(nd, "at91emac");
++    dev = qdev_create(NULL, "at91emac");
++    qdev_set_nic_properties(dev, nd);
++    qdev_init_nofail(dev);
++    s = SYS_BUS_DEVICE(dev);
++    sysbus_mmio_map(s, 0, base);
++    sysbus_connect_irq(s, 0, irq);
++}
++
++static void at91emac_realize(DeviceState *dev, Error **errp)
++{
++    at91emac_state *s = AT91EMAC(dev);
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91emac_mem_ops, s, "at91emac", 0x1000);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    qemu_macaddr_default_if_unset(&s->conf.macaddr);
++    s->nic = qemu_new_nic(&net_at91emac_info, &s->conf,
++                          object_get_typename(OBJECT(dev)), dev->id, s);
++    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
++    s->sa2l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
++    s->sa2h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
++    s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
++    s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
++    at91emac_reset(dev);
++}
++
++static void at91emac_class_init(ObjectClass *klass, void *data){
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = at91emac_realize;
++    dc->reset = at91emac_reset;
++    dc->vmsd = &vmstate_at91emac;
++    dc->props = at91emac_properties;
++}
++
++static const TypeInfo at91emac_info = {
++    .name = TYPE_AT91EMAC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91emac_state),
++    .class_init = at91emac_class_init,
++};
++
++static void at91emac_register_types(void)
++{
++    type_register_static(&at91emac_info);
++}
++
++type_init(at91emac_register_types)
+diff --git a/hw/net/at91g20emac.c b/hw/net/at91g20emac.c
+new file mode 100644
+index 0000000000..49d97bb8d5
+--- /dev/null
++++ b/hw/net/at91g20emac.c
+@@ -0,0 +1,745 @@
++/*
++ * AT91 Ethernet MAC (for AT91RM9200)
++ *
++ * Copyright (c) 2012 Daniel Röhrig, René Sechting
++ * Copyright (c) 2007, 2009 Filip Navara
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++/*
++ * WARNING!
++ * This is written for the AT91RM9200 which has a different behavior than all
++ * the other (or most, we don't know) AT91-boards. So have a look in your documentation.
++ * XXX wrong...
++ */
++
++/*
++ * TODO:
++ * PHY read/write (MII/RMII), statistics, VLAN, hash addressing, jumbo frame
++ * sending, ...
++ */
++
++#include "qemu/osdep.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "migration/vmstate.h"
++#include "net/net.h"
++#include "hw/net/at91g20emac.h"
++
++/* #define DEBUG_EMAC */
++
++#define EMAC_SIZE        0x4000
++
++#define EMAC_CTL         0x00 /* Control Register */
++#define EMAC_CFG         0x04
++#define EMAC_SR          0x08 /* Status Register */
++#define EMAC_TAR         0x0c /* Transmit Address Register */
++#define EMAC_TCR         0x10 /* Transmit Control Register */
++#define EMAC_TSR         0x14 /* Transmit Status Register */
++#define EMAC_RBQP        0x18 /* Receive Buffer Queue Pointer */
++#define EMAC_TBQP        0x1c /* Transmit Buffer Queue Pointer */
++#define EMAC_RSR         0x20 /* Receive Status Register */
++#define EMAC_ISR         0x24 /* Interrupt Status Register */
++#define EMAC_IER         0x28 /* Interrupt Enable Register */
++#define EMAC_IDR         0x2c /* Interrupt Disable Register */
++#define EMAC_IMR         0x30 /* Interrupt Mask Register WARNING! 1 means OFF*/
++#define EMAC_MAN         0x34 /* PHY Maintenance Register */
++#define EMAC_SA1H         0x9C /* High Part of MAC-Adress */
++#define EMAC_SA1L         0x98 /* Low Part of MAC-Adress */
++#define EMAC_SA2H         0xA4 /* High Part of MAC-Address */
++#define EMAC_SA2L         0xA0 /* Low Part of MAC-Address */
++
++#define PHY_CTRL         0x00 /* Control Register */
++#define PHY_STATUS       0x01 /* Status Regiser */
++#define PHY_ID1          0x02 /* Phy Id Reg (word 1) */
++#define PHY_ID2          0x03 /* Phy Id Reg (word 2) */
++#define PHY_AUTONEG_ADV  0x04 /* Autoneg Advertisement */
++#define PHY_LP_ABILITY   0x05 /* Link Partner Ability (Base Page) */
++#define PHY_AUTONEG_EXP  0x06 /* Autoneg Expansion Reg */
++#define PHY_NEXT_PAGE_TX 0x07 /* Next Page TX */
++#define PHY_LP_NEXT_PAGE 0x08 /* Link Partner Next Page */
++#define PHY_1000T_CTRL   0x09 /* 1000Base-T Control Reg */
++#define PHY_1000T_STATUS 0x0a /* 1000Base-T Status Reg */
++#define PHY_EXT_STATUS   0x0f /* Extended Status Reg */
++
++#define CTL_LB           0x01 /* Loopback */
++#define CTL_LLB          0x02 /* Loopback local */
++#define CTL_RE           0x04 /* Receive enable */
++#define CTL_TE           0x08 /* Transmit enable */
++#define CTL_MPE          0x10 /* Management port enable */
++#define CTL_CLRSTAT      0x20 /* Clear statistics registers */
++#define CTL_INCSTAT      0x40 /* Increment statistics registers */
++#define CTL_WESTAT       0x80 /* Write enable for statistics registers */
++#define CTL_BP           0x100 /* Back pressure */
++#define CTL_TSTART       0x200 /* Transmit start */
++
++#define CFG_SPD          0x01 /* Speed (100 or 10) */
++#define CFG_FD           0x02 /* Full Duplex */
++#define CFG_JFRAME       0x08 /* Jumbo Frames */
++#define CFG_CAF          0x10 /* Copy All Frames */
++#define CFG_NBC          0x20 /* No Broadcast */
++#define CFG_MTI          0x40 /* Multicast Hash Enable */
++#define CFG_UNI          0x80 /* Unicast Hash Enable */
++#define CFG_BIG          0x100 /* Receive 1536 byte frames */
++#define CFG_CLK          0xC00
++#define CFG_CLK_HCLK_8   0 /* HCLK divided by 8 */
++#define CFG_CLK_HCLK_16  0x400 /* HCLK divided by 16 */
++#define CFG_CLK_HCLK_32  0x800 /* HCLK divided by 32 */
++#define CFG_CLK_HCLK_64  0xc00 /* HCLK divided by 64 */
++#define CFG_RTY          0x1000 /* Retry Test */
++#define CFG_PAE          0x2000 /* Pause Enable */
++#define CFG_RBOF         0xC000 /* Receive Buffer Offset */
++#define CFG_RLCE         0x10000 /* Receive Length field Checking Enable */
++#define CFG_DRFCS        0x20000 /* Discard Receive FCS */
++#define CFG_EFRHD        0x40000 /* Enable Frame Receive in Half-Duplex mode */
++#define CFG_IRXFCS       0x80000 /* Ignore RX FCS */
++
++#define SR_IDLE          0x04
++
++#define TSR_UBR          0x01 /* Used Bit Read */
++#define TSR_COL          0x02 /* Collision Occured */
++#define TSR_RLE          0x04 /* Retry Limit Exceeded */
++#define TSR_TGO          0x08 /* Transmit Go */
++#define TSR_BEX          0x10 /* Buffers exhausted mid-frame */
++#define TSR_COMP         0x20 /* Transmit Complete */
++#define TSR_UND          0x40 /* Transmit Underrun */
++
++#define ISR_MFD          0x01 /* Management Frame Done */
++#define ISR_RCOMP        0x02 /* Receive Completed */
++#define ISR_RBNA         0x04 /* Receive Buffer Not Available */
++#define ISR_TXUBR        0x08 /* Transmit Used Bit Read */
++#define ISR_TUND         0x10 /* Transmit Buffer Underrun */
++#define ISR_RLE          0x20 /* Retry Limit Exceeded */
++#define ISR_TXERR        0x40 /* Transmit Error */
++#define ISR_TCOMP        0x80 /* Transmit Complete */
++#define ISR_ROVR         0x400 /* Receive Overrun */
++
++#define TXDESC_USED      0x80000000
++#define TXDESC_WRAP      0x40000000
++#define TXDESC_NOCRC     0x10000
++#define TXDESC_LAST      0x8000
++
++#define CRCPOLY_LE 0xedb88320
++
++#define TYPE_AT91G20EMAC "at91g20emac"
++#define AT91G20EMAC(obj) OBJECT_CHECK(at91g20emac_state, (obj), TYPE_AT91G20EMAC)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    qemu_irq irq;
++    MemoryRegion iomem;
++    NICState *nic;
++    NICConf conf;
++    uint32_t ctl;
++    uint32_t cfg;
++    uint32_t sr;
++    uint32_t tar;
++    uint32_t tcr;
++    uint32_t tsr;
++    uint32_t rbqp;
++    uint32_t rbqp_base;
++    uint32_t tbqp;
++    uint32_t tbqp_base;
++    uint32_t rsr;
++    uint32_t isr;
++    uint32_t imr;
++    uint32_t man;
++
++    uint32_t hsl;
++    uint16_t hsh;
++    uint32_t sa1l;
++    uint16_t sa1h;
++    uint32_t sa2l;
++    uint16_t sa2h;
++    uint32_t sa3l;
++    uint16_t sa3h;
++    uint32_t sa4l;
++    uint16_t sa4h;
++    uint8_t sa_valid;
++} at91g20emac_state;
++
++static const VMStateDescription vmstate_at91g20emac = {
++    .name = "at91g20emac",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields      = (VMStateField []) {
++        VMSTATE_UINT32(ctl, at91g20emac_state),
++        VMSTATE_UINT32(cfg, at91g20emac_state),
++        VMSTATE_UINT32(sr, at91g20emac_state),
++        VMSTATE_UINT32(tar, at91g20emac_state),
++        VMSTATE_UINT32(tcr, at91g20emac_state),
++        VMSTATE_UINT32(tsr, at91g20emac_state),
++        VMSTATE_UINT32(rbqp, at91g20emac_state),
++        VMSTATE_UINT32(rbqp_base, at91g20emac_state),
++        VMSTATE_UINT32(tbqp, at91g20emac_state),
++        VMSTATE_UINT32(tbqp_base, at91g20emac_state),
++        VMSTATE_UINT32(rsr, at91g20emac_state),
++        VMSTATE_UINT32(isr, at91g20emac_state),
++        VMSTATE_UINT32(imr, at91g20emac_state),
++        VMSTATE_UINT32(man, at91g20emac_state),
++        VMSTATE_UINT32(hsl, at91g20emac_state),
++        VMSTATE_UINT16(hsh, at91g20emac_state),
++        VMSTATE_UINT32(sa1l, at91g20emac_state),
++        VMSTATE_UINT16(sa1h, at91g20emac_state),
++        VMSTATE_UINT32(sa2l, at91g20emac_state),
++        VMSTATE_UINT16(sa2h, at91g20emac_state),
++        VMSTATE_UINT32(sa3l, at91g20emac_state),
++        VMSTATE_UINT16(sa3h, at91g20emac_state),
++        VMSTATE_UINT32(sa4l, at91g20emac_state),
++        VMSTATE_UINT16(sa4h, at91g20emac_state),
++        VMSTATE_UINT8(sa_valid, at91g20emac_state),
++    }
++};
++
++static uint32_t crc32_le(uint32_t crc, unsigned char const *p, size_t len)
++{
++    int i;
++    while (len--) {
++        crc ^= *p++;
++        for (i = 0; i < 8; i++)
++            crc = (crc >> 1) ^ ((crc & 1) ? CRCPOLY_LE : 0);
++    }
++    return crc;
++}
++
++static uint32_t address_match(at91g20emac_state *s, const uint8_t *buf)
++{
++    uint32_t addrl = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
++    uint16_t addrh = (buf[5] << 8) | buf[4];
++
++    if ((s->sa_valid & 1) && addrl == s->sa1l && addrh == s->sa1h)
++        return (1 << 26);
++    if ((s->sa_valid & 2) && addrl == s->sa2l && addrh == s->sa2h)
++        return (1 << 25);
++    if ((s->sa_valid & 4) && addrl == s->sa3l && addrh == s->sa3h)
++        return (1 << 24);
++    if ((s->sa_valid & 8) && addrl == s->sa4l && addrh == s->sa4h)
++        return (1 << 23);
++    if (!(s->cfg & CFG_NBC) && addrl == ~0 && addrh == 0xffff)
++        return (1 << 31);
++    /* TODO: hash addressing */
++
++    return 0;
++}
++
++static int at91g20emac_can_receive(NetClientState *nc)
++{
++    at91g20emac_state *s = qemu_get_nic_opaque(nc);
++    return !!(s->ctl & CTL_RE);
++}
++
++static ssize_t at91g20emac_receive(NetClientState *nc, const uint8_t *buf, size_t size)
++{
++    at91g20emac_state *s = qemu_get_nic_opaque(nc);
++    uint32_t rx_desc;
++    uint32_t buffer_addr;
++    uint32_t status_len;
++    uint32_t status_len_le;
++    uint8_t segment_size;
++    size_t saved_size;
++    int wrap;
++
++    if (!(s->ctl & CTL_RE))
++        return -1;
++
++    /* Reject frame with invalid size */
++    if (size < 6 || size > 10240) {
++        return size;
++    }
++    if ((size > 1536 && !(s->cfg & CFG_JFRAME)) ||
++        (size > 1518 && !(s->cfg & CFG_BIG))) {
++        return size;
++    }
++
++    status_len = address_match(s, buf);
++
++    /* Either the address has to match or promiscuous mode must be enabled */
++    if (status_len == 0 && !(s->cfg & CFG_CAF)) {
++        return size;
++    }
++
++    /* TODO: VLAN, FCS checks (CFG_DRFCS, CFG_IRXFCS) */
++
++    /* Start of frame */
++    status_len = 1 << 14;
++    saved_size = size;
++
++    do {
++        cpu_physical_memory_read(s->rbqp, (uint8_t *)&rx_desc, sizeof(uint32_t));
++        rx_desc = le32_to_cpu(rx_desc);
++
++        if (rx_desc & 1) /* Ownership bit */
++        {
++            s->rsr |= 1; /* Buffer Not Available */
++            s->isr |= ISR_RBNA;
++            if (!(s->imr & ISR_RBNA)) {
++                printf("Receive Buffer full IRQ\n");
++                fflush(0);
++                qemu_set_irq(s->irq, 1);
++            }
++            return size;
++        } else {
++            wrap = rx_desc & 2;
++            buffer_addr = rx_desc & ~3; /* Mask out the WRAP and OWNERSHIP bits */
++
++            segment_size = size <= 128 ? size : 128;
++            cpu_physical_memory_write(buffer_addr, buf, segment_size);
++            size -= segment_size;
++            buf += segment_size;
++
++            if (size == 0)
++                status_len |= (1 << 15) | saved_size;
++            status_len_le = cpu_to_le32(status_len);
++            cpu_physical_memory_write(s->rbqp + 4, (uint8_t *)&status_len_le, sizeof(uint32_t));
++            status_len &= ~(1 << 14);
++
++            /* Set owner bit to CPU */
++            rx_desc |= 1;
++            rx_desc = cpu_to_le32(rx_desc);
++            cpu_physical_memory_write(s->rbqp, (uint8_t *)&rx_desc, sizeof(uint32_t));
++
++            if (wrap || s->rbqp - s->rbqp_base == 8192) {
++                s->rbqp = s->rbqp_base;
++            } else {
++                s->rbqp = s->rbqp + 8;
++            }
++        }
++    } while (size > 0);
++
++    /* Frame Received */
++    s->rsr |= 2;
++    s->isr |= ISR_RCOMP;
++    if (!(s->imr & ISR_RCOMP)) {
++        qemu_set_irq(s->irq, 1);
++
++    }
++
++    // return value should be != 0 otherwise we disable receiving completely
++    return saved_size;
++}
++
++static void at91g20emac_send(at91g20emac_state *s)
++{
++    uint32_t crc;
++    uint8_t buf[2048 + sizeof(crc)];
++    uint32_t size;
++
++    size = s->tcr & 0x7ff;
++
++    cpu_physical_memory_read(s->tar, buf, size);
++
++    if (!(s->tcr & (1 << 15))) { /* No CRC bit */
++        /* Pad the frame to minimal length */
++        if (size < 60) {
++            memset(buf + size, 0, 60 - size);
++            size = 60;
++        }
++
++        /* Add CRC */
++        crc = cpu_to_le32(~crc32_le(~0, buf, size));
++        memcpy(buf + size, &crc, sizeof(crc));
++        size += 4;
++    }
++
++    if (s->ctl & CTL_LLB) {
++        at91g20emac_receive(qemu_get_queue(s->nic), buf, size);
++    } else {
++        qemu_send_packet(qemu_get_queue(s->nic), buf, size);
++    }
++
++    /* Transfer Complete */
++    s->tsr |= TSR_COMP;
++    s->isr |= ISR_TCOMP;
++    if (!(s->imr & ISR_TCOMP)) {
++        qemu_set_irq(s->irq, 1);
++    }
++}
++
++static void at91g20emac_send_queue(at91g20emac_state *s)
++{
++    uint32_t crc;
++    uint8_t buf[2048 + sizeof(crc)];
++    uint32_t buffer_addr;
++    uint32_t tx_desc;
++    uint32_t frame_size;
++    int used;
++    int wrap;
++
++    do {
++        cpu_physical_memory_read(s->tbqp, (uint8_t *)&buffer_addr, sizeof(uint32_t));
++        cpu_physical_memory_read(s->tbqp + 4, (uint8_t *)&tx_desc, sizeof(uint32_t));
++        buffer_addr = le32_to_cpu(buffer_addr);
++        tx_desc = le32_to_cpu(tx_desc);
++
++        used = !!(tx_desc & TXDESC_USED);
++        wrap = !!(tx_desc & TXDESC_WRAP);
++
++        if (!used) {
++            frame_size = tx_desc & 0x7ff;
++            cpu_physical_memory_read(le32_to_cpu(buffer_addr), buf, frame_size);
++
++            /* TODO: Jumbo frame - !(tx_desc & TXDESC_LAST) */
++            /* TODO: Pause frame */
++
++            if (!(tx_desc & TXDESC_NOCRC)) {
++                /* Pad the frame to minimal length */
++                if (frame_size < 60) {
++                    memset(buf + frame_size, 0, 60 - frame_size);
++                    frame_size = 60;
++                }
++
++                /* Add CRC */
++                crc = cpu_to_le32(~crc32_le(~0, buf, frame_size));
++                memcpy(buf + frame_size, &crc, sizeof(crc));
++                frame_size += 4;
++            }
++
++            if (s->ctl & CTL_LLB) {
++                at91g20emac_receive(qemu_get_queue(s->nic), buf, frame_size);
++            } else {
++                qemu_send_packet(qemu_get_queue(s->nic), buf, frame_size);
++            }
++
++            /* Set owner bit to CPU */
++            tx_desc |= 1 << 31;
++            tx_desc = cpu_to_le32(tx_desc);
++            cpu_physical_memory_write(s->tbqp + 4, (uint8_t *)&tx_desc, sizeof(uint32_t));
++
++            if (wrap || s->tbqp - s->tbqp_base == 8192) {
++                s->tbqp = s->tbqp_base;
++            } else {
++                s->tbqp = s->tbqp + 8;
++            }
++        }
++    } while (!used);
++
++    /* Transfer Complete */
++    s->tsr |= TSR_COMP;
++    s->isr |= ISR_TCOMP;
++    s->tsr &= ~(1<<3);
++    if (!(s->imr & ISR_TCOMP)) {
++       qemu_set_irq(s->irq, 1);
++    }
++}
++
++static uint16_t at91g20emac_phy_read(at91g20emac_state *s, uint8_t reg)
++{
++    switch (reg) {
++        case PHY_ID1:
++            return 0x0181; /* DM9161 */
++        case PHY_ID2:
++            return 0xb8a0;
++        case PHY_STATUS:
++            return
++                (1 << 15) | /* 100BASE-T4 Capable */
++                (1 << 5) | /* Auto-negotion Complete */
++                (1 << 3) | /* Auto Configuration Ability */
++                (1 << 2); /* Link Status */
++        case PHY_AUTONEG_ADV:
++            return (1 << 9) | 1; /* 100BASE-T4, IEEE 802.3 */
++        default:
++            return 0;
++    }
++}
++
++static void at91g20emac_phy_write(at91g20emac_state *s, uint8_t reg, uint16_t value)
++{
++}
++
++static uint64_t at91g20emac_mem_read(void *opaque, hwaddr offset, unsigned size)
++{
++    at91g20emac_state *s = opaque;
++    uint32_t isr;
++    offset &= EMAC_SIZE - 1;
++
++    switch (offset) {
++    case EMAC_CTL:
++        return s->ctl;
++    case EMAC_CFG:
++        return s->cfg;
++    case EMAC_SR:
++        return s->sr;
++    case EMAC_TAR:
++        return s->tar;
++    case EMAC_TCR:
++        return s->tcr;
++    case EMAC_TSR:
++        return s->tsr;
++    case EMAC_RBQP:
++        return s->rbqp;
++    case EMAC_TBQP:
++        return s->tbqp;
++    case EMAC_RSR:
++        return s->rsr;
++    case EMAC_ISR:
++        isr = s->isr;
++        s->isr = 0;
++        qemu_set_irq(s->irq, 0); //This is important! Do not delete!
++        return isr;
++    case EMAC_IMR:
++        return s->imr;
++    case EMAC_MAN:
++        return s->man;
++    case EMAC_SA1L:
++    return s->sa1l;
++    case EMAC_SA1H:
++    return s->sa1h;
++    case EMAC_SA2H:
++    return s->sa2h;
++    case EMAC_SA2L:
++    return s->sa2l;
++    default:
++    printf("Default?: %lu\n",offset);
++        return 0;
++    }
++}
++
++static void at91g20emac_mem_write(void *opaque, hwaddr offset,
++                uint64_t value, unsigned size)
++{
++    at91g20emac_state *s = opaque;
++
++    offset &= EMAC_SIZE - 1;
++    switch (offset) {
++    case EMAC_CTL:
++        s->ctl = value & ~(CTL_CLRSTAT | CTL_INCSTAT);
++        /* TODO: CTL_CLRSTAT, CTL_INCSTAT */
++        if ((value & (CTL_TSTART | CTL_TE)) == (CTL_TSTART | CTL_TE)) {
++            at91g20emac_send_queue(s);
++        } else if (!(value & CTL_TE)){
++            s->tbqp = s->tbqp_base;
++        }
++        break;
++    case EMAC_CFG:
++        s->cfg = value;
++        break;
++    case EMAC_TAR:
++        s->tar = value;
++        break;
++    case EMAC_TCR: /* RM9200 only */
++        s->tcr = value;
++        if (s->ctl & CTL_TE)
++            at91g20emac_send(s);
++        break;
++    case EMAC_TSR:
++        s->tsr &= ~value;
++        break;
++    case EMAC_RBQP:
++        s->rbqp_base = s->rbqp = value;
++        break;
++    case EMAC_TBQP:
++        s->tbqp_base = s->tbqp = value;
++        break;
++    case EMAC_RSR:
++        s->rsr &= ~value;
++        break;
++    case EMAC_ISR:
++        s->isr = value;
++        break;
++    case EMAC_IER:
++        s->imr &= ~value;
++        break;
++    case EMAC_IDR:
++        s->imr |= value;
++        break;
++    case EMAC_MAN:
++        /* Check for PHY Address 31 */
++        if (((value >> 23) & 0x1f) == 31) {
++            if ((value & 0x30000000) == 0x20000000) {
++                value &= ~0xffff;
++                value |= at91g20emac_phy_read(s, (value >> 18) & 0x1f);
++            } else if ((value & 0x30000000) == 0x10000000) {
++                at91g20emac_phy_write(s, (value >> 18) & 0x1f, value & 0xffff);
++            }
++            /* TODO: Interrupts, checks */
++        }
++        s->sr |= SR_IDLE;
++        s->man = value;
++        break;
++    case 0x90:
++        s->hsl = value;
++        s->sa_valid &= ~16;
++        break;
++    case 0x94:
++        s->hsh = value & 0xffff;
++        s->sa_valid |= 16;
++        break;
++    case 0x98:
++        s->sa1l = value;
++        s->sa_valid &= ~1;
++        break;
++    case 0x9c:
++        s->sa1h = value & 0xffff;
++        s->sa_valid |= 1;
++        break;
++    case 0xa0:
++        s->sa2l = value;
++        s->sa_valid &= ~2;
++        break;
++    case 0xa4:
++        s->sa2h = value & 0xffff;
++        s->sa_valid |= 2;
++        break;
++    case 0xa8:
++        s->sa3l = value;
++        s->sa_valid &= ~4;
++        break;
++    case 0xac:
++        s->sa3h = value & 0xffff;
++        s->sa_valid |= 4;
++        break;
++    case 0xb0:
++        s->sa4l = value;
++        s->sa_valid &= ~8;
++        break;
++    case 0xb4:
++        s->sa4h = value & 0xffff;
++        s->sa_valid |= 8;
++        break;
++    default:
++        return;
++    }
++}
++
++#ifdef DEBUG_EMAC
++static uint64_t at91g20emac_mem_read_dbg(void *opaque, hwaddr offset, unsigned size)
++{
++    uint64_t value = at91g20emac_mem_read(opaque, offset);
++    printf("%s offset=%lx val=%lx\n", __func__, offset, value);
++    return value;
++}
++
++static void at91g20emac_mem_write_dbg(void *opaque, hwaddr offset,
++                uint64_t value, unsigned size)
++{
++    printf("%s offset=%lx val=%lx\n", __func__, offset, value);
++    at91g20emac_mem_write(opaque, offset, value);
++}
++
++#define at91g20emac_mem_read at91g20emac_mem_read_dbg
++#define at91g20emac_mem_write at91g20emac_mem_write_dbg
++#endif
++
++static const MemoryRegionOps at91g20emac_mem_ops = {
++    .read = at91g20emac_mem_read,
++    .write = at91g20emac_mem_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91g20emac_cleanup(NetClientState *nc)
++{
++    at91g20emac_state *s = qemu_get_nic_opaque(nc);
++    s->nic = NULL;
++}
++
++static NetClientInfo net_at91g20emac_info = {
++    .type = NET_CLIENT_DRIVER_NIC,
++    .size = sizeof(NICState),
++    .can_receive = at91g20emac_can_receive,
++    .receive = at91g20emac_receive,
++    .cleanup = at91g20emac_cleanup,
++};
++
++static void at91g20emac_reset(DeviceState *dev)
++{
++    at91g20emac_state *s = AT91G20EMAC(dev);
++
++    s->ctl = 0;
++    s->cfg = CFG_CLK_HCLK_32;
++    s->sr = 0;
++    s->tar = 0;
++    s->tcr = 0;
++    s->tsr = 0x18;
++    s->rbqp = 0;
++    s->rbqp_base = 0;
++    s->tbqp = 0;
++    s->tbqp_base = 0;
++    s->rsr = 0;
++    s->isr = 0;
++    s->imr = 0xfff; //(Keine IRQs)
++    s->man = 0;
++    s->hsl = 0;
++    s->hsh = 0;
++    s->sa3l = 0;
++    s->sa3h = 0;
++    s->sa4l = 0;
++    s->sa4h = 0;
++    s->sa_valid = 3;
++}
++
++static Property at91g20emac_properties[] = {
++    DEFINE_NIC_PROPERTIES(at91g20emac_state, conf),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
++void at91g20emac_init1(NICInfo *nd, uint32_t base, qemu_irq irq)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    qemu_check_nic_model(nd, "at91g20emac");
++    dev = qdev_create(NULL, "at91g20emac");
++    qdev_set_nic_properties(dev, nd);
++    qdev_init_nofail(dev);
++    s = SYS_BUS_DEVICE(dev);
++    sysbus_mmio_map(s, 0, base);
++    sysbus_connect_irq(s, 0, irq);
++}
++
++static void at91g20emac_realize(DeviceState *dev, Error **erp)
++{
++    at91g20emac_state *s = AT91G20EMAC(dev);
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91g20emac_mem_ops, s, "at91g20emac", 0x1000);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    qemu_macaddr_default_if_unset(&s->conf.macaddr);
++    s->nic = qemu_new_nic(&net_at91g20emac_info, &s->conf,
++                          object_get_typename(OBJECT(dev)), dev->id, s);
++    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
++    s->sa2l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
++    s->sa2h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
++    s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
++    s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
++    at91g20emac_reset(dev);
++}
++
++static void at91g20emac_class_init(ObjectClass *klass, void *data){
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = at91g20emac_realize;
++    dc->reset = at91g20emac_reset;
++    dc->vmsd = &vmstate_at91g20emac;
++    dc->props = at91g20emac_properties;
++}
++
++
++static const TypeInfo at91g20emac_info = {
++    .name = TYPE_AT91G20EMAC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91g20emac_state),
++    .class_init = at91g20emac_class_init,
++};
++
++static void at91g20emac_register_types(void)
++{
++    type_register_static(&at91g20emac_info);
++}
++
++type_init(at91g20emac_register_types)
+diff --git a/hw/timer/Makefile.objs b/hw/timer/Makefile.objs
+index dece235fd7..f85165c249 100644
+--- a/hw/timer/Makefile.objs
++++ b/hw/timer/Makefile.objs
+@@ -35,3 +35,5 @@ common-obj-$(CONFIG_CMSDK_APB_TIMER) += cmsdk-apb-timer.o
+ common-obj-$(CONFIG_CMSDK_APB_DUALTIMER) += cmsdk-apb-dualtimer.o
+ common-obj-$(CONFIG_MSF2) += mss-timer.o
+ common-obj-$(CONFIG_RASPI) += bcm2835_systmr.o
++
++common-obj-$(CONFIG_PORTUX) += at91st.o at91g20st.o
+diff --git a/hw/timer/at91g20st.c b/hw/timer/at91g20st.c
+new file mode 100644
+index 0000000000..ee82ba82d1
+--- /dev/null
++++ b/hw/timer/at91g20st.c
+@@ -0,0 +1,360 @@
++/*
++ * Timer for the portuxg20
++ * All timers!
++ */
++
++#include "qemu/osdep.h"
++#include "qemu-common.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/runstate.h"
++#include "migration/vmstate.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "qemu/timer.h"
++#include "qemu/cutils.h"
++
++#define TYPE_AT91G20ST "at91g20st"
++#define AT91G20ST(obj) OBJECT_CHECK(at91g20st_state, (obj), TYPE_AT91G20ST)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    QEMUTimer *pi_timer;
++    QEMUTimer *wd_timer;
++    QEMUTimer *rt_timer;
++    QEMUTimer *rt_inc_timer;
++    uint64_t startup_real_time;
++    uint64_t time_last_change;
++    qemu_irq irq;
++    uint32_t tick_offset;
++
++    //RealTimeTimer
++    uint32_t rtt_mr;
++    uint32_t rtt_ar;
++    uint32_t rtt_vr;
++    uint32_t rtt_sr;
++
++    //PeriodicIntervallTimer
++    uint32_t pit_mr;
++    uint32_t pit_sr;
++    uint32_t pit_pivr;
++    uint32_t pit_piir;
++
++    //WatchdogTimer
++    uint32_t wdt_cr;
++    uint32_t wdt_mr;
++    uint32_t wdt_sr;
++
++} at91g20st_state;
++
++static const VMStateDescription vmstate_at91g20st = {
++    .name = "at91g20st",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32(tick_offset, at91g20st_state),
++
++        VMSTATE_UINT32(rtt_mr, at91g20st_state),
++        VMSTATE_UINT32(rtt_ar, at91g20st_state),
++        VMSTATE_UINT32(rtt_vr, at91g20st_state),
++        VMSTATE_UINT32(rtt_sr, at91g20st_state),
++
++        VMSTATE_UINT32(pit_mr, at91g20st_state),
++        VMSTATE_UINT32(pit_sr, at91g20st_state),
++        VMSTATE_UINT32(pit_pivr, at91g20st_state),
++        VMSTATE_UINT32(pit_piir, at91g20st_state),
++
++        VMSTATE_UINT32(wdt_cr, at91g20st_state),
++        VMSTATE_UINT32(wdt_mr, at91g20st_state),
++        VMSTATE_UINT32(wdt_sr, at91g20st_state),
++
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++static void periodic_set_alarm(at91g20st_state *s);
++
++/*
++ * TODO hz is int. but hz can be 0.5. That's not good
++ */
++static void realtime_handler(void * opaque)
++{
++    printf("\n****RealTimeHAndler****");
++    fflush(0);
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    s->rtt_sr |=1;
++    qemu_set_irq(s->irq, 1);
++}
++
++static void realtime_set_alarm(at91g20st_state *s)
++{
++    printf("\n****RealTimeSetAlarm****");
++    fflush(0);
++    uint64_t prescaler = s->rtt_mr & 0xFFFF;
++    if(prescaler == 0) //eq 2^16
++        prescaler = 0x10000;
++    uint32_t hz = 0x8000/prescaler;
++    uint32_t diff = s->rtt_ar - s->rtt_vr;
++    if(diff>0){
++        timer_mod(s->rt_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME)+(1000000*diff)/hz);
++    }
++}
++
++static void realtime_increment_set_alarm(at91g20st_state *s)
++{
++    printf("\n****IncRealTimeSetAlarm****");
++    fflush(0);
++    uint64_t prescaler = s->rtt_mr & 0xFFFF;
++    if(prescaler == 0) //eq 2^16
++        prescaler = 0x10000;
++    uint32_t hz = 0x8000/prescaler;
++    timer_mod(s->rt_inc_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME)+(1000000/hz));
++}
++
++static void realtime_increment_handler(void *opaque)
++{
++    printf("\n****IncRealTimeHandler****");
++    fflush(0);
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    //s->rtt_sr |= 2;
++    if(s->rtt_mr & (1<<17)){
++        qemu_set_irq(s->irq, 1);
++        realtime_increment_set_alarm(s);
++    }
++}
++
++
++static void periodic_handler(void * opaque)
++{
++    //printf("\n--periodic Handler Aufgerufen");
++    //fflush(0);
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    int temp = s->pit_pivr>>20;
++    temp++;
++    s->pit_pivr=temp<<20|(s->pit_pivr&0xFFFFF);
++    s->pit_sr=0x1;
++    if(s->pit_mr&(1<<24)){ //PITEN Register set
++        if(s->pit_mr&(1<<25)){ //PITIEN Register set
++            qemu_set_irq(s->irq, 1);
++        }
++        periodic_set_alarm(s);
++    }
++}
++
++static void periodic_set_alarm(at91g20st_state *s)
++{
++
++    int64_t now;
++    uint32_t ticks;
++
++    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++
++    ticks = ((s->pit_mr&0xFFFFF)/8250); //Ticks in Milliseconds
++    timer_mod(s->pi_timer, now + ticks*1000000);
++}
++
++static void wd_set_alarm(at91g20st_state *s)
++{
++        int64_t now;
++        uint32_t ticks;
++
++        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++
++        ticks = (((s->wdt_mr &0xFFF))/32768) + now / NANOSECONDS_PER_SECOND;
++        timer_mod(s->wd_timer, now + ticks*NANOSECONDS_PER_SECOND/1000);
++}
++
++static void wd_interrupt(void * opaque)
++{
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    s->wdt_sr = 0x1;
++    if(s->wdt_mr&0x1000){
++    qemu_set_irq(s->irq,1);
++    }
++    if(s->wdt_mr&0x2000){
++    wd_set_alarm(s);
++    }
++}
++
++
++static uint64_t at91g20st_read(void *opaque, hwaddr offset,
++                           unsigned size)
++{
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    uint32_t temp, hz;
++    uint64_t prescaler;
++    if(offset < 0x10){
++        prescaler = s->rtt_mr & 0xFFFF;
++        if(prescaler == 0) //eq 2^16
++            prescaler = 0x10000;
++        hz = 0x8000/prescaler;
++        temp = s->rtt_vr;
++        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++        s->rtt_vr+=(now -  s->time_last_change)/(hz*1000000000);
++        if(temp<s->rtt_vr){
++            s->rtt_sr|=2;
++            s->time_last_change = now;
++        }
++    }
++    switch (offset) {
++    //Real Time Timer
++    case 0x0:
++        return s->rtt_mr;
++    case 0x04:
++        return s->rtt_ar;
++    case 0x08:
++        return s->rtt_vr;
++    case 0x0C:
++        temp = s->rtt_sr;
++        s->rtt_sr &= ~0x3;
++        return temp;
++    //Periodic Interval Timer
++    case 0x10:
++        return s->pit_mr;
++    case 0x14:
++        return s->pit_sr;
++    case 0x18:
++        s->pit_sr &= ~0x1;
++        temp = s->pit_pivr;
++        s->pit_pivr &= 0xFFFF;
++        return temp;
++    case 0x1C:
++        temp = s->pit_pivr;
++        s->pit_pivr &= 0xFFFF;
++        s->pit_sr =0x0;
++        return temp;
++
++    case 0x24:
++        //TODO: READ ONCE!!
++        return s->wdt_mr;
++    case 0x28:
++        return s->wdt_sr;
++    default:
++        fprintf(stderr, "at91g20st_read: Bad offset %x (returning zero)\n", (int)offset);
++        return 0;
++    }
++}
++
++static void at91g20st_write(void * opaque, hwaddr offset,
++                        uint64_t value, unsigned size)
++{
++    at91g20st_state *s = (at91g20st_state *)opaque;
++    uint64_t tmp, prescaler;
++    uint32_t hz;
++
++    switch (offset) {
++    //RealTime
++    case 0x0: //Mode Register
++        prescaler = s->rtt_mr & 0xFFFF;
++        if(prescaler == 0) //eq 2^16
++            prescaler = 0x10000;
++        hz = 0x8000/prescaler;
++        tmp=qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++        s->rtt_vr+=(tmp -  s->time_last_change)/(hz*1000000);
++        s->time_last_change=tmp;
++        s->rtt_mr = value;
++        if(value & (1<<18)) { //Reset and (maybe) restart clock
++            s->startup_real_time = tmp;
++            s->rtt_vr=0; // XXX this wasn't guarded by if, now is -- correct?
++        }
++        if(value & (1<<17))
++            realtime_increment_set_alarm(s);
++        if(value & (1<<16))
++            realtime_set_alarm(s);
++        break;
++    case 0x4: // Alarm Register
++        s->rtt_ar = value;
++        realtime_set_alarm(s);
++        break;
++    // Periodic
++    case 0x10: // Mode Register
++        s->pit_mr = value;
++        periodic_set_alarm(s);
++        break;
++    case 0x20:
++        //0-Bit=1: Restarte den Timer
++        //TODO: value >> 24 = 0xA5 sonst kein schreiben
++        if((value&0x1)&&((value>>24)==0xA5)){
++            wd_set_alarm(s);
++        }
++        break;
++    case 0x24:
++        //TODO Write ONCE
++        //Writing this register starts the timer
++        //TODO 13. Bit = 1 : Restarte den Timer wenn abgelaufen
++        //TODO 12. Bit = 1 : Interrupt enabled on underflow
++        s->wdt_mr=value;
++        wd_set_alarm(s);
++        break;
++    default:
++        fprintf(stderr, "at91g20st_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static const MemoryRegionOps at91g20st_ops = {
++    .read = at91g20st_read,
++    .write = at91g20st_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91g20st_realize(DeviceState *dev, Error **erp)
++{
++    at91g20st_state *s = AT91G20ST(dev);
++    struct tm tm;
++
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91g20st_ops, s, "at91g20st", 0x30);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++
++    s->startup_real_time = s->time_last_change = qemu_clock_get_ns(QEMU_CLOCK_REALTIME); //Save the current timestamp
++
++    // Periodic Intervall Timer
++    qemu_get_timedate(&tm, 0);
++    s->tick_offset = mktimegm(&tm);
++
++    s->pi_timer = timer_new_ns(QEMU_CLOCK_REALTIME, periodic_handler, s);
++    s->wd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wd_interrupt, s);
++    s->rt_timer = timer_new_ns(QEMU_CLOCK_REALTIME, realtime_handler, s);
++    s->rt_inc_timer = timer_new_ns(QEMU_CLOCK_REALTIME, realtime_increment_handler, s);
++
++    //RealTimeTimer
++    s->rtt_mr=0x8000;
++    s->rtt_ar=0xFFFFFFFF;
++    s->rtt_vr=0x0;
++    s->rtt_sr=0x0;
++
++    //PeriodicIntervallTimer
++    s->pit_mr=0xFFFFF;
++    s->pit_sr=0x0;
++    s->pit_pivr=0x0;
++    s->pit_piir=0x0;
++
++    //WatchdogTimer
++    s->wdt_cr=0x0;
++    s->wdt_mr=0x3FFF2FFF;
++    s->wdt_sr=0x0;
++}
++
++static void at91g20st_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = at91g20st_realize;
++    dc->user_creatable = false; /* FIXME explain why */
++    dc->vmsd = &vmstate_at91g20st;
++}
++
++static const TypeInfo at91g20st_info = {
++    .name          = TYPE_AT91G20ST,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91g20st_state),
++    .class_init    = at91g20st_class_init,
++};
++
++static void at91g20st_register_types(void)
++{
++    type_register_static(&at91g20st_info);
++}
++
++type_init(at91g20st_register_types)
+diff --git a/hw/timer/at91st.c b/hw/timer/at91st.c
+new file mode 100644
+index 0000000000..85e6c615e3
+--- /dev/null
++++ b/hw/timer/at91st.c
+@@ -0,0 +1,307 @@
++/*
++ * Atmel AT91RM9200 System Timer (ST)
++ */
++
++#include "qemu/osdep.h"
++#include "qemu-common.h"
++#include "migration/vmstate.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/runstate.h"
++#include "hw/irq.h"
++#include "hw/sysbus.h"
++#include "qemu/timer.h"
++
++#define TYPE_AT91ST "at91st"
++#define AT91ST(obj) OBJECT_CHECK(at91st_state, (obj), TYPE_AT91ST)
++
++typedef struct {
++    SysBusDevice parent_obj;
++    MemoryRegion iomem;
++    QEMUTimer *st_timer;
++    QEMUTimer *wd_timer;
++    QEMUTimer *rt_timer;
++    qemu_irq irq;
++    uint32_t pimr;
++    uint32_t wdmr;
++    uint32_t rtmr;
++    uint32_t sr;
++    uint32_t imr;
++    uint32_t rtar;
++    uint32_t crtr;
++} at91st_state;
++
++static const VMStateDescription vmstate_at91st = {
++    .name = "at91st",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (VMStateField[]) {
++        VMSTATE_UINT32(pimr, at91st_state),
++        VMSTATE_UINT32(wdmr, at91st_state),
++        VMSTATE_UINT32(rtmr, at91st_state),
++        VMSTATE_UINT32(sr, at91st_state),
++        VMSTATE_UINT32(imr, at91st_state),
++        VMSTATE_UINT32(rtar, at91st_state),
++        VMSTATE_UINT32(crtr, at91st_state),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
++
++/* System Timer Register Mapping */
++#define ST_CR   0x00
++#define ST_PIMR 0x04
++#define ST_WDMR 0x08
++#define ST_RTMR 0x0C
++#define ST_SR   0x10
++#define ST_IER  0x14
++#define ST_IDR  0x18
++#define ST_IMR  0x1C
++#define ST_RTAR 0x20
++#define ST_CRTR 0x24
++
++/* Status bits and masks */
++#define WDRST (1 << 0)
++
++#define PIMR_MASK 0xffff
++#define PIV_MASK 0xffff
++
++#define WDMR_MASK 0x0001ffff
++#define WDV_MASK 0xffff
++#define RSTEN (1 << 16)
++
++#define RTMR_MASK 0xffff
++#define RTPRES_MASK 0xffff
++
++#define IMR_MASK 0x000f
++#define PITS (1 << 0)
++#define WDOVF (1 << 1)
++#define RTTINC (1 << 2)
++#define ALMS (1 << 3)
++
++#define RTAR_MASK 0x000fffff
++#define ALMV_MASK 0x000fffff
++
++#define CRTV_MASK 0x000fffff
++
++static void at91st_update(at91st_state *s)
++{
++    /*
++     * Signal IRQ if an interrupt is enabled and the corresponding
++     * status bit is set
++     */
++    qemu_set_irq(s->irq, !!(s->imr & s->sr));
++}
++
++static void st_set_alarm(at91st_state *s)
++{
++    int64_t t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t piv = s->pimr & PIV_MASK;
++
++    /* zero in PIV is largest value */
++    if (piv == 0) {
++        piv = 0x10000;
++    }
++
++    /* piv == 0x10000 => 2 second interval */
++    t += NANOSECONDS_PER_SECOND * piv * 2 / 0x10000;
++
++    timer_mod(s->st_timer, t);
++}
++
++static void st_interrupt(void *opaque)
++{
++    at91st_state *s = opaque;
++    s->sr |= PITS;
++    st_set_alarm(s);
++    at91st_update(s);
++}
++
++static void wd_set_alarm(at91st_state *s)
++{
++    int64_t t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t wdv = s->wdmr & WDV_MASK;
++
++    /* zero in WDV is largest value */
++    if (wdv == 0)
++        wdv = 0x10000;
++
++    /* wdv == 0x10000 => 256 second interval */
++    t += NANOSECONDS_PER_SECOND * wdv * 256 / 0x10000;
++
++    timer_mod(s->wd_timer, t);
++}
++
++static void wd_interrupt(void *opaque)
++{
++    at91st_state *s = opaque;
++    s->sr |= WDOVF;
++    if (s->wdmr & RSTEN) {
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++    }
++    wd_set_alarm(s);
++    at91st_update(s);
++}
++
++static void rt_set_alarm(at91st_state *s)
++{
++    int64_t t = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t rtpres = s->rtmr & RTPRES_MASK;
++
++    /* zero in RTPRES is largest value */
++    if (rtpres == 0)
++        rtpres = 0x10000;
++
++    /* rtpres == 0x10000 => 2 second interval */
++    t += NANOSECONDS_PER_SECOND * rtpres * 2 / 0x10000;
++
++    timer_mod(s->rt_timer, t);
++}
++
++static void rt_interrupt(void *opaque)
++{
++    at91st_state *s = opaque;
++
++    /* Increment Realtime Counter */
++    s->crtr = (s->crtr + 1) & CRTV_MASK;
++    s->sr |= RTTINC;
++
++    /* Check alarm */
++    if (s->crtr == s->rtar) {
++        s->sr |= ALMS;
++    }
++
++    rt_set_alarm(s);
++    at91st_update(s);
++}
++
++static uint64_t at91st_read(void *opaque, hwaddr offset,
++                           unsigned size)
++{
++    at91st_state *s = (at91st_state *)opaque;
++    uint32_t temp;
++
++    switch (offset) {
++    case ST_PIMR:   // Period Interval Mode Register
++        return s->pimr;
++    case ST_WDMR:   // Watchdog Mode Register
++        return s->wdmr;
++    case ST_RTMR:   // Real-Time Mode Register
++        return s->rtmr;
++    case ST_SR:     // Status Register
++        temp = s->sr;
++        s->sr = 0;
++        at91st_update(s);
++        return temp;
++    case ST_IMR:    // Interrupt Mask Register
++        return s->imr;
++    case ST_RTAR:   // Real-Time Alarm Register
++        return s->rtar;
++    case ST_CRTR:   // Current Real-Time Register
++        return s->crtr;
++    default:
++        fprintf(stderr, "at91st_read: Bad offset %x (returning zero)\n", (int)offset);
++        return 0;
++    }
++}
++
++static void at91st_write(void *opaque, hwaddr offset,
++                        uint64_t value, unsigned size)
++{
++    at91st_state *s = opaque;
++
++    switch (offset) {
++    case ST_CR:     // Control Register
++        if (value & WDRST) {
++            wd_set_alarm(s);
++        }
++        break;
++    case ST_PIMR:   // Period Interval Mode Register
++        s->pimr = value & PIMR_MASK;
++        st_set_alarm(s);
++        break;
++    case ST_WDMR:   // Watchdog Mode Register
++        s->wdmr = value & WDMR_MASK;
++        break;
++    case ST_RTMR:   // Real-Time Mode Register
++        s->rtmr = value & RTMR_MASK;
++        rt_set_alarm(s);
++        break;
++    case ST_IER:    // Interrupt Enable Register
++        s->imr |= value & IMR_MASK;
++        at91st_update(s);
++        break;
++    case ST_IDR:    // Interrupt Disable Register
++        s->imr &= ~(value & IMR_MASK);
++        at91st_update(s);
++        break;
++    case ST_RTAR:   // Real-Time Alarm Register
++        s->rtar = value & RTAR_MASK;
++        break;
++    default:
++        fprintf(stderr, "at91st_write: Bad offset %x\n", (int)offset);
++    }
++}
++
++static const MemoryRegionOps at91st_ops = {
++    .read = at91st_read,
++    .write = at91st_write,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void at91st_reset(DeviceState *dev) {
++    at91st_state *s = AT91ST(dev);
++
++    s->pimr = 0;
++    s->wdmr = 0; /* Datasheet say default is 0x20000, but that bit is not defined */
++    s->rtmr = 0x8000;
++    s->sr = 0;
++    s->imr = 0;
++    s->rtar = 0;
++    s->crtr = 0;
++
++    at91st_update(s);
++}
++
++static void at91st_init(Object *obj)
++{
++    DeviceState *dev = DEVICE(obj);
++    at91st_state *s = AT91ST(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    struct tm tm;
++
++    memory_region_init_io(&s->iomem, obj, &at91st_ops, s, "at91st", 0x1FF);
++    sysbus_init_mmio(sbd, &s->iomem);
++
++    sysbus_init_irq(sbd, &s->irq);
++    qemu_get_timedate(&tm, 0);
++
++    s->st_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st_interrupt, s);
++    s->wd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wd_interrupt, s);
++    s->rt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rt_interrupt, s);
++
++    at91st_reset(dev); // is this needed ?
++}
++
++static void at91st_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->user_creatable = false; /* FIXME explain why */
++    dc->reset = at91st_reset;
++    dc->vmsd = &vmstate_at91st;
++}
++
++static const TypeInfo at91st_info = {
++    .name          = TYPE_AT91ST,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(at91st_state),
++    .instance_init = at91st_init,
++    .class_init    = at91st_class_init,
++};
++
++static void at91st_register_types(void)
++{
++    type_register_static(&at91st_info);
++}
++
++type_init(at91st_register_types)
+diff --git a/include/hw/char/at91.h b/include/hw/char/at91.h
+new file mode 100644
+index 0000000000..af92574fb9
+--- /dev/null
++++ b/include/hw/char/at91.h
+@@ -0,0 +1,54 @@
++/*
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2 or later, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef HW_AT91_H
++#define HW_AT91_H
++
++#include "hw/qdev-properties.h"
++
++static inline DeviceState *at91dbgu_create(hwaddr addr,
++                                        qemu_irq irq,
++                                        Chardev *chr)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    dev = qdev_create(NULL, "at91dbgu");
++    s = SYS_BUS_DEVICE(dev);
++    qdev_prop_set_chr(dev, "chardev", chr);
++    qdev_init_nofail(dev);
++    sysbus_mmio_map(s, 0, addr);
++    sysbus_connect_irq(s, 0, irq);
++
++    return dev;
++}
++
++static inline DeviceState *at91usart_create(hwaddr addr,
++                                                 qemu_irq irq,
++                                                 Chardev *chr)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    dev = qdev_create(NULL, "at91usart");
++    s = SYS_BUS_DEVICE(dev);
++    qdev_prop_set_chr(dev, "chardev", chr);
++    qdev_init_nofail(dev);
++    sysbus_mmio_map(s, 0, addr);
++    sysbus_connect_irq(s, 0, irq);
++
++    return dev;
++}
++
++#endif
+diff --git a/include/hw/net/at91emac.h b/include/hw/net/at91emac.h
+new file mode 100644
+index 0000000000..634a13fc91
+--- /dev/null
++++ b/include/hw/net/at91emac.h
+@@ -0,0 +1,33 @@
++/*
++ * AT91 Ethernet MAC (for AT91RM9200)
++ *
++ * Copyright (c) 2012 Daniel Röhrig, René Sechting
++ * Copyright (c) 2007, 2009 Filip Navara
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++#ifndef HW_NET_AT91EMAC
++#define HW_NET_AT91EMAC
++
++#include "hw/irq.h"
++#include "net/net.h"
++
++void at91emac_init1(NICInfo *, uint32_t, qemu_irq);
++
++#endif
+diff --git a/include/hw/net/at91g20emac.h b/include/hw/net/at91g20emac.h
+new file mode 100644
+index 0000000000..bb63aea0fa
+--- /dev/null
++++ b/include/hw/net/at91g20emac.h
+@@ -0,0 +1,33 @@
++/*
++ * AT91 Ethernet MAC (for AT91RM9200)
++ *
++ * Copyright (c) 2012 Daniel Röhrig, René Sechting
++ * Copyright (c) 2007, 2009 Filip Navara
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++#ifndef HW_NET_AT91G20EMAC
++#define HW_NET_AT91G20EMAC
++
++#include "hw/irq.h"
++#include "net/net.h"
++
++void at91g20emac_init1(NICInfo *, uint32_t, qemu_irq);
++
++#endif
+diff --git a/include/sysemu/sysemu.h b/include/sysemu/sysemu.h
+index 80c57fdc4e..e6b6b6f17d 100644
+--- a/include/sysemu/sysemu.h
++++ b/include/sysemu/sysemu.h
+@@ -85,7 +85,7 @@ int serial_max_hds(void);
+ 
+ /* parallel ports */
+ 
+-#define MAX_PARALLEL_PORTS 3
++#define MAX_PARALLEL_PORTS 7
+ 
+ extern Chardev *parallel_hds[MAX_PARALLEL_PORTS];
+ 
+diff --git a/pc-bios/optionrom/Makefile b/pc-bios/optionrom/Makefile
+index e33a24da0d..f817c618ab 100644
+--- a/pc-bios/optionrom/Makefile
++++ b/pc-bios/optionrom/Makefile
+@@ -13,7 +13,7 @@ $(call set-vpath, $(SRC_PATH)/pc-bios/optionrom)
+ ifeq ($(lastword $(filter -O%, -O0 $(CFLAGS))),-O0)
+ override CFLAGS += -O2
+ endif
+-override CFLAGS += -march=i486
++override CFLAGS += -march=i486 -fcf-protection=none
+ 
+ # Drop -fstack-protector and the like
+ QEMU_CFLAGS := $(filter -W%, $(QEMU_CFLAGS)) $(CFLAGS_NOPIE) -ffreestanding
+@@ -47,10 +47,10 @@ build-all: multiboot.bin linuxboot.bin linuxboot_dma.bin kvmvapic.bin pvh.bin
+ 	$(call quiet-command,$(CPP) $(QEMU_INCLUDES) $(QEMU_DGFLAGS) -c -o - $< | $(AS) $(ASFLAGS) -o $@,"AS","$(TARGET_DIR)$@")
+ 
+ pvh.img: pvh.o pvh_main.o
+-	$(call quiet-command,$(LD) $(LDFLAGS_NOPIE) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $^,"BUILD","$(TARGET_DIR)$@")
++	$(call quiet-command,$(LD) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $^,"BUILD","$(TARGET_DIR)$@")
+ 
+ %.img: %.o
+-	$(call quiet-command,$(LD) $(LDFLAGS_NOPIE) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $<,"BUILD","$(TARGET_DIR)$@")
++	$(call quiet-command,$(LD) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $<,"BUILD","$(TARGET_DIR)$@")
+ 
+ %.raw: %.img
+ 	$(call quiet-command,$(OBJCOPY) -O binary -j .text $< $@,"BUILD","$(TARGET_DIR)$@")
+diff --git a/qemu-options.hx b/qemu-options.hx
+index e14d88e9b2..95f4f98acc 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -1641,6 +1641,17 @@ debug a Linux kernel with a serial console. Use @key{C-a h} for help on
+ switching between the console and monitor.
+ ETEXI
+ 
++
++DEF("piotelnet", 0, QEMU_OPTION_piotelnet,
++    "-piotelnet	open a telnet server at port 444444 for the LEDs and the LCD on the Portux920T-MiniPC. Only useful there\n",
++    QEMU_ARCH_ALL)
++STEXI
++@item -piotelnet
++@findex -piotelnet
++Opens a telnet server at port 444444 for the LEDs and the LCD on
++the Portux920T-MiniPC. Only useful there.
++ETEXI
++
+ DEF("curses", 0, QEMU_OPTION_curses,
+     "-curses         shorthand for -display curses\n",
+     QEMU_ARCH_ALL)
+diff --git a/target/arm/cpu.c b/target/arm/cpu.c
+index 7a4ac9339b..e420c214f8 100644
+--- a/target/arm/cpu.c
++++ b/target/arm/cpu.c
+@@ -1697,6 +1697,17 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
+ /* CPU models. These are not needed for the AArch64 linux-user build. */
+ #if !defined(CONFIG_USER_ONLY) || !defined(TARGET_AARCH64)
+ 
++static void arm920_initfn(Object *obj)
++{
++    ARMCPU *cpu = ARM_CPU(obj);
++    set_feature(&cpu->env, ARM_FEATURE_V4T);
++    cpu->midr = 0x41129200;
++    cpu->ctr = 0x0d172172;
++    cpu->reset_sctlr = 0x00000078;
++    //value after u-boot
++    //cpu->reset_sctlr = 0xc000107e;
++}
++
+ static void arm926_initfn(Object *obj)
+ {
+     ARMCPU *cpu = ARM_CPU(obj);
+@@ -2542,6 +2553,7 @@ struct ARMCPUInfo {
+ 
+ static const ARMCPUInfo arm_cpus[] = {
+ #if !defined(CONFIG_USER_ONLY) || !defined(TARGET_AARCH64)
++    { .name = "arm920",      .initfn = arm920_initfn },
+     { .name = "arm926",      .initfn = arm926_initfn },
+     { .name = "arm946",      .initfn = arm946_initfn },
+     { .name = "arm1026",     .initfn = arm1026_initfn },
+diff --git a/util/cacheinfo.c b/util/cacheinfo.c
+index ea6f3e99bf..d94dc6adc8 100644
+--- a/util/cacheinfo.c
++++ b/util/cacheinfo.c
+@@ -93,10 +93,16 @@ static void sys_cache_info(int *isize, int *dsize)
+ static void sys_cache_info(int *isize, int *dsize)
+ {
+ # ifdef _SC_LEVEL1_ICACHE_LINESIZE
+-    *isize = sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
++    int tmp_isize = (int) sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
++    if (tmp_isize > 0) {
++        *isize = tmp_isize;
++    }
+ # endif
+ # ifdef _SC_LEVEL1_DCACHE_LINESIZE
+-    *dsize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
++    int tmp_dsize = (int) sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
++    if (tmp_dsize > 0) {
++        *dsize = tmp_dsize;
++    }
+ # endif
+ }
+ #endif /* sys_cache_info */
+diff --git a/vl.c b/vl.c
+index bf0a6345d2..92108f97e8 100644
+--- a/vl.c
++++ b/vl.c
+@@ -186,6 +186,7 @@ bool boot_strict;
+ uint8_t *boot_splash_filedata;
+ int only_migratable; /* turn it off unless user states otherwise */
+ bool wakeup_suspend_enabled;
++int pio_telnet = 0;
+ 
+ int icount_align_option;
+ 
+@@ -3733,6 +3734,9 @@ int main(int argc, char **argv, char **envp)
+                     }
+                     break;
+                 }
++            case QEMU_OPTION_piotelnet:
++		pio_telnet = 1;
++		break;
+             case QEMU_OPTION_qtest:
+                 qtest_chrdev = optarg;
+                 break;

@@ -1,30 +1,108 @@
-diff --git a/chardev/char-io.c b/chardev/char-io.c
-index 8ced184160..b507c114a4 100644
---- a/chardev/char-io.c
-+++ b/chardev/char-io.c
-@@ -46,6 +46,9 @@ static gboolean io_watch_poll_prepare(GSource *source,
-     IOWatchPoll *iwp = io_watch_poll_from_source(source);
-     bool now_active = iwp->fd_can_read(iwp->opaque) > 0;
-     bool was_active = iwp->src != NULL;
-+
-+    *timeout = 10;
-+
-     if (was_active == now_active) {
-         return FALSE;
-     }
-diff --git a/chardev/char-mux.c b/chardev/char-mux.c
-index 200c62a0d0..0d546b79cc 100644
---- a/chardev/char-mux.c
-+++ b/chardev/char-mux.c
-@@ -197,6 +197,8 @@ static int mux_chr_can_read(void *opaque)
- {
-     MuxChardev *d = MUX_CHARDEV(opaque);
-     int m = d->focus;
-+    mux_chr_accept_input (opaque);
-+
-     CharBackend *be = d->backends[m];
+From 5854c5b64a5c8c985cfacb685ab025610c3a6c9c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Thu, 24 May 2018 23:04:05 +0200
+Subject: [PATCH 01/30] Add options for pio via telnet and network cards
+
+---
+ qemu-options.hx | 11 +++++++++++
+ vl.c            |  4 ++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/qemu-options.hx b/qemu-options.hx
+index e14d88e9b2..95f4f98acc 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -1641,6 +1641,17 @@ debug a Linux kernel with a serial console. Use @key{C-a h} for help on
+ switching between the console and monitor.
+ ETEXI
  
-     if ((d->prod[m] - d->cons[m]) < MUX_BUFFER_SIZE) {
++
++DEF("piotelnet", 0, QEMU_OPTION_piotelnet,
++    "-piotelnet	open a telnet server at port 444444 for the LEDs and the LCD on the Portux920T-MiniPC. Only useful there\n",
++    QEMU_ARCH_ALL)
++STEXI
++@item -piotelnet
++@findex -piotelnet
++Opens a telnet server at port 444444 for the LEDs and the LCD on
++the Portux920T-MiniPC. Only useful there.
++ETEXI
++
+ DEF("curses", 0, QEMU_OPTION_curses,
+     "-curses         shorthand for -display curses\n",
+     QEMU_ARCH_ALL)
+diff --git a/vl.c b/vl.c
+index bf0a6345d2..92108f97e8 100644
+--- a/vl.c
++++ b/vl.c
+@@ -186,6 +186,7 @@ bool boot_strict;
+ uint8_t *boot_splash_filedata;
+ int only_migratable; /* turn it off unless user states otherwise */
+ bool wakeup_suspend_enabled;
++int pio_telnet = 0;
+ 
+ int icount_align_option;
+ 
+@@ -3733,6 +3734,9 @@ int main(int argc, char **argv, char **envp)
+                     }
+                     break;
+                 }
++            case QEMU_OPTION_piotelnet:
++		pio_telnet = 1;
++		break;
+             case QEMU_OPTION_qtest:
+                 qtest_chrdev = optarg;
+                 break;
+-- 
+2.34.1
+
+
+From 55d1e091e7a23cbc1473f28e6d9c35c6c4020793 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Thu, 24 May 2018 23:06:32 +0200
+Subject: [PATCH 02/30] Add our hardware and init function
+
+---
+ default-configs/arm-softmmu.mak |   1 +
+ hw/arm/Kconfig                  |   5 +
+ hw/arm/Makefile.objs            |   1 +
+ hw/arm/boot.c                   |   4 +
+ hw/arm/portux920t.c             | 325 ++++++++++++++
+ hw/arm/portuxg20.c              | 125 ++++++
+ hw/char/Makefile.objs           |   3 +
+ hw/char/at91dbgu.c              | 424 ++++++++++++++++++
+ hw/char/at91usart.c             | 331 ++++++++++++++
+ hw/display/Makefile.objs        |   2 +
+ hw/display/at91display.c        |  86 ++++
+ hw/gpio/Makefile.objs           |   1 +
+ hw/gpio/at91pio.c               | 354 +++++++++++++++
+ hw/intc/Makefile.objs           |   1 +
+ hw/intc/at91_intor.c            | 100 +++++
+ hw/intc/at91aic.c               | 381 ++++++++++++++++
+ hw/net/Makefile.objs            |   3 +
+ hw/net/at91emac.c               | 744 ++++++++++++++++++++++++++++++++
+ hw/net/at91g20emac.c            | 743 +++++++++++++++++++++++++++++++
+ hw/timer/Makefile.objs          |   2 +
+ hw/timer/at91g20st.c            | 355 +++++++++++++++
+ hw/timer/at91st.c               | 302 +++++++++++++
+ include/hw/net/at91emac.h       |  33 ++
+ include/hw/net/at91g20emac.h    |  33 ++
+ target/arm/cpu.c                |  12 +
+ 25 files changed, 4371 insertions(+)
+ create mode 100644 hw/arm/portux920t.c
+ create mode 100644 hw/arm/portuxg20.c
+ create mode 100644 hw/char/at91dbgu.c
+ create mode 100644 hw/char/at91usart.c
+ create mode 100644 hw/display/at91display.c
+ create mode 100644 hw/gpio/at91pio.c
+ create mode 100644 hw/intc/at91_intor.c
+ create mode 100644 hw/intc/at91aic.c
+ create mode 100644 hw/net/at91emac.c
+ create mode 100644 hw/net/at91g20emac.c
+ create mode 100644 hw/timer/at91g20st.c
+ create mode 100644 hw/timer/at91st.c
+ create mode 100644 include/hw/net/at91emac.h
+ create mode 100644 include/hw/net/at91g20emac.h
+
 diff --git a/default-configs/arm-softmmu.mak b/default-configs/arm-softmmu.mak
 index 1f2e0e7fde..2b834bda4b 100644
 --- a/default-configs/arm-softmmu.mak
@@ -34,29 +112,22 @@ index 1f2e0e7fde..2b834bda4b 100644
  CONFIG_FSL_IMX6UL=y
  CONFIG_SEMIHOSTING=y
 +CONFIG_PORTUX=y
-diff --git a/dtc b/dtc
-index 88f18909db..e54388015a 160000
---- a/dtc
-+++ b/dtc
-@@ -1 +1 @@
--Subproject commit 88f18909db731a627456f26d779445f84e449536
-+Subproject commit e54388015af1fb4bf04d0bca99caba1074d9cc42
 diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
-index c6e7782580..afec87c98f 100644
+index c6e7782580..e99a799ca9 100644
 --- a/hw/arm/Kconfig
 +++ b/hw/arm/Kconfig
-@@ -80,6 +80,11 @@ config MAINSTONE
-     select PFLASH_CFI01
-     select SMC91C111
+@@ -88,6 +88,11 @@ config MUSCA
+     select SPLIT_IRQ
+     select UNIMP
  
 +config PORTUX
 +    bool
 +    select AT91EMAC
 +    select AT91G20EMAC
 +
- config MUSCA
+ config MUSICPAL
      bool
-     select ARMSSE
+     select BITBANG_I2C
 diff --git a/hw/arm/Makefile.objs b/hw/arm/Makefile.objs
 index fe749f65fd..836b4765e8 100644
 --- a/hw/arm/Makefile.objs
@@ -70,13 +141,13 @@ index fe749f65fd..836b4765e8 100644
  obj-$(CONFIG_ARM_V7M) += armv7m.o
  obj-$(CONFIG_EXYNOS4) += exynos4210.o
 diff --git a/hw/arm/boot.c b/hw/arm/boot.c
-index c264864c11..089eb5742b 100644
+index 8fb4a63606..3ca2a3cba4 100644
 --- a/hw/arm/boot.c
 +++ b/hw/arm/boot.c
-@@ -786,6 +786,10 @@ static void do_cpu_reset(void *opaque)
-                 info->secondary_cpu_reset_hook(cpu, info);
+@@ -790,6 +790,10 @@ static void do_cpu_reset(void *opaque)
              }
          }
+         arm_rebuild_hflags(env);
 +        /* Portux920T Special Case: We want to have a SP after booting for techGI 3 */
 +		if(info->board_id==0x310){
 +			env->regs[13]=0x200F00;
@@ -86,10 +157,10 @@ index c264864c11..089eb5742b 100644
  
 diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
 new file mode 100644
-index 0000000000..795e8dbc50
+index 0000000000..21fd81f089
 --- /dev/null
 +++ b/hw/arm/portux920t.c
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,325 @@
 +/*
 + * ARM Taskit Portux920T Emulation
 + *
@@ -104,18 +175,14 @@ index 0000000000..795e8dbc50
 + *
 + */
 +
-+#include "qemu/osdep.h"
-+#include "qapi/error.h"
-+#include "cpu.h"
-+#include "migration/vmstate.h"
 +#include "hw/sysbus.h"
-+#include "hw/net/at91emac.h"
-+#include "sysemu/sysemu.h"
-+#include "hw/arm/boot.h"
++#include "hw/devices.h"
++#include "hw/arm/arm.h"
 +#include "hw/boards.h"
 +#include "exec/address-spaces.h"
 +#include "net/net.h"
-+#include "hw/char/at91.h"
++
++static ARMCPU *cpu;
 +
 +/*
 + * ++++++++++++++++++++++++++++++++++++
@@ -125,7 +192,7 @@ index 0000000000..795e8dbc50
 + * Everything that triggers an operation on the memory
 + * regions of the 920T is declared here
 + */
-+static MemoryRegion *ram_alias; // XX shouldn't be global probably
++static MemoryRegion *ram_alias;
 +
 +#define TYPE_PORTUX920MC "portux920mc"
 +#define PORTUX920MC(obj) OBJECT_CHECK(portux920mc_state, (obj), TYPE_PORTUX920MC)
@@ -135,8 +202,6 @@ index 0000000000..795e8dbc50
 +    MemoryRegion iomem;
 +    qemu_irq irq;
 +
-+    uint32_t asr;
-+    uint32_t aasr;
 +    uint32_t mpr;
 +} portux920mc_state;
 +
@@ -178,11 +243,11 @@ index 0000000000..795e8dbc50
 +
 +    switch (offset) {
 +    case 0x4: // Abort Status Register
-+        asr = s->asr;
-+        s->asr &= ~0x0f000000;
++        asr = cpu->env.asr;
++        cpu->env.asr &= ~0x0f000000;
 +        return asr;
 +    case 0x8: // Abort Address Status Register
-+        return s->aasr;
++        return cpu->env.aasr;
 +    case 0xC: // Master Priority Register
 +        return s->mpr;
 +    default:
@@ -216,8 +281,8 @@ index 0000000000..795e8dbc50
 +    portux920mc_state *s = PORTUX920MC(dev);
 +
 +    s->mpr = 0x3210;
-+    s->asr = 0;
-+    s->aasr = 0;
++    cpu->env.asr = 0;
++    cpu->env.aasr = 0;
 +    do_remap(false);
 +}
 +
@@ -234,15 +299,18 @@ index 0000000000..795e8dbc50
 +/*
 + * Initialization of the memory regions and the IRQ
 + */
-+static void portux920mc_realize(DeviceState *dev, Error **errp)
++static int portux920mc_init(SysBusDevice *sbd)
 +{
++    DeviceState *dev = DEVICE(sbd);
 +    portux920mc_state *s = PORTUX920MC(dev);
 +
 +    memory_region_init_io(&s->iomem, OBJECT(s), &portux920mc_ops, s, "portux920mc", 0x50);
-+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
-+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
 +
 +    portux920mc_reset(dev);
++
++    return 0;
 +}
 +
 +/*
@@ -265,8 +333,11 @@ index 0000000000..795e8dbc50
 +
 +static void portux920t_init(MachineState *machine)
 +{
-+    Object *cpuobj;
 +    ram_addr_t ram_size = machine->ram_size;
++    const char *cpu_model = machine->cpu_model;
++    const char *kernel_filename = machine->kernel_filename;
++    const char *kernel_cmdline = machine->kernel_cmdline;
++    const char *initrd_filename = machine->initrd_filename;
 +    MemoryRegion *sysmem = get_system_memory();
 +    MemoryRegion *ram = g_new(MemoryRegion, 1); //1MB Internal Ram
 +    MemoryRegion *ram2 = g_new(MemoryRegion, 1); //64MB External Ram
@@ -274,25 +345,22 @@ index 0000000000..795e8dbc50
 +    qemu_irq aic[32];
 +    qemu_irq aic_sys[32];
 +    DeviceState *dev;
-+    ARMCPU *cpu;
 +
 +    /* Warning! This is in fact just a copy of the arm926 with a V4T chip set
 +       instead of a V5! */
-+    cpuobj = object_new(machine->cpu_type);
-+    object_property_set_bool(cpuobj, true, "realized", &error_fatal);
-+
-+    cpu = ARM_CPU(cpuobj);
++    cpu_model = "arm920";
++    cpu = cpu_arm_init(cpu_model);
 +    if (!cpu) {
 +        fprintf(stderr, "Unable to find CPU definition\n");
 +        exit(1);
 +    }
 +
 +    /* Initialize 1MB RAM and 64MB RAM */
-+    memory_region_init_ram(ram, NULL, "internal.ram", 0x100000, NULL);
-+    memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000, NULL); //Memory-Size is fixed at 64M
++    memory_region_init_ram(ram, NULL, "internal.ram", 0x100000);
++    memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000); //Memory-Size is fixed at 64M
 +    //memory_region_init_ram(nand_flash, NULL, "LCD.ram", 0x40); //Cute 64Byte, no not K just B
-+    //vmstate_register_ram_global(ram);
-+    //vmstate_register_ram_global(ram2);
++    vmstate_register_ram_global(ram);
++    vmstate_register_ram_global(ram2);
 +    /* 1MB ram at address zero.  */
 +    memory_region_add_subregion(sysmem, 0x200000, ram);
 +    memory_region_set_enabled(ram, true);
@@ -351,13 +419,13 @@ index 0000000000..795e8dbc50
 +     * Periphery
 +     * +++++++++
 +     */
-+    at91dbgu_create(0xFFFFF200, aic_sys[0], serial_hd(0));
++    sysbus_create_simple("at91dbgu", 0xFFFFF200, aic_sys[0]);
 +    sysbus_create_simple("at91pio", 0xFFFFF400, NULL);
 +    sysbus_create_simple("at91st", 0xFFFFFD00, aic_sys[1]);
-+    at91usart_create(0xFFFC0000, NULL, serial_hd(1));
-+    at91usart_create(0xFFFC4000, NULL, serial_hd(2));
-+    at91usart_create(0xFFFC8000, NULL, serial_hd(3));
-+    at91usart_create(0xFFFCC000, NULL, serial_hd(4));
++    sysbus_create_simple("at91usart", 0xFFFC0000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFC4000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFC8000, NULL);
++    sysbus_create_simple("at91usart", 0xFFFCC000, NULL);
 +
 +    sysbus_create_simple("at91display", 0x40000000, NULL);
 +
@@ -368,45 +436,38 @@ index 0000000000..795e8dbc50
 +     * +++++++++++++
 +     */
 +    portux920t_binfo.ram_size = ram_size;
++    portux920t_binfo.kernel_filename = kernel_filename;
++    portux920t_binfo.kernel_cmdline = kernel_cmdline;
++    portux920t_binfo.initrd_filename = initrd_filename;
 +    portux920t_binfo.board_id = 0x310; //found at arm.linux.org.uk/developer/machines/
 +    portux920t_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
 +
-+    arm_load_kernel(cpu, machine, &portux920t_binfo);
++    arm_load_kernel(cpu, &portux920t_binfo);
 +}
 +
-+static void portux920t_class_init(ObjectClass *oc, void *data)
-+{
-+    MachineClass *mc = MACHINE_CLASS(oc);
-+
-+    mc->desc = "ARM Taskit Portux920t (ARM920)";
-+    mc->init = portux920t_init;
-+    //mc->block_default_type = IF_SCSI; XXX
-+    //mc->ignore_memory_transaction_failures = true;
-+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
-+}
-+
-+static const TypeInfo portux920t_type = {
-+    .name = MACHINE_TYPE_NAME("portux920t"),
-+    .parent = TYPE_MACHINE,
-+    .class_init = portux920t_class_init,
++static QEMUMachine portux920t_machine = {
++    .name = "portux920t",
++    .desc = "ARM Taskit Portux920t (ARM920)",
++    .init = portux920t_init,
 +};
 +
 +
 +/* Register the machine */
 +static void portux920t_machine_init(void)
 +{
-+    type_register_static(&portux920t_type);
++    qemu_register_machine(&portux920t_machine);
 +}
 +
-+type_init(portux920t_machine_init);
++machine_init(portux920t_machine_init);
 +
 +
 +/* Initialize Memory Controller Class */
 +static void portux920mc_class_init(ObjectClass *klass, void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    dc->realize = portux920mc_realize;
++    k->init = portux920mc_init;
 +    dc->reset = portux920mc_reset;
 +    dc->vmsd = &vmstate_portux920mc;
 +}
@@ -427,25 +488,23 @@ index 0000000000..795e8dbc50
 +type_init(portux920t_register_types)
 diff --git a/hw/arm/portuxg20.c b/hw/arm/portuxg20.c
 new file mode 100644
-index 0000000000..4ac90eb157
+index 0000000000..4757c21bd0
 --- /dev/null
 +++ b/hw/arm/portuxg20.c
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,125 @@
 +/*
 + *
 + *    ARM taskit PortuxG20
 + *
 + */
 +
-+#include "qemu/osdep.h"
-+#include "cpu.h"
-+#include "migration/vmstate.h"
++
 +#include "hw/sysbus.h"
-+#include "hw/arm/boot.h"
++#include "hw/arm/arm.h"
 +#include "hw/boards.h"
 +#include "exec/address-spaces.h"
 +#include "net/net.h"
-+#include "hw/net/at91g20emac.h"
++#include "hw/devices.h"
 +
 +/* Board init.  */
 +static struct arm_boot_info portuxg20_binfo;
@@ -454,8 +513,11 @@ index 0000000000..4ac90eb157
 +
 +static void portuxg20_init(MachineState *machine)
 +{
-+    Object *cpuobj;
 +    ram_addr_t ram_size = machine->ram_size;
++    const char *cpu_model = machine->cpu_model;
++    const char *kernel_filename = machine->kernel_filename;
++    const char *kernel_cmdline = machine->kernel_cmdline;
++    const char *initrd_filename = machine->initrd_filename;
 +    ARMCPU *cpu;
 +    MemoryRegion *sysmem = get_system_memory();
 +    MemoryRegion *sram0 = g_new(MemoryRegion, 1); //internal 16kB Ram
@@ -465,18 +527,17 @@ index 0000000000..4ac90eb157
 +    qemu_irq aic_sys[32];
 +    DeviceState *dev;
 +
-+    cpuobj = object_new(machine->cpu_type);
-+
-+    cpu = ARM_CPU(cpuobj);
++    cpu_model = "arm926";
++    cpu = cpu_arm_init(cpu_model);
 +    if (!cpu) {
 +        fprintf(stderr, "Unable to find CPU definition\n");
 +        exit(1);
 +    }
 +
 +    /* Initialize RAM */
-+    memory_region_init_ram(sram0, NULL, "Internal SRAM0", 0x4000, NULL); // 16kB sram0
-+    memory_region_init_ram(sram1, NULL, "Internal SRAM1", 0x4000, NULL); // 16kB sram1
-+    memory_region_init_ram(sdram, NULL, "SDRAM", 0x8000000, NULL);         // 128MB sdram
++    memory_region_init_ram(sram0, NULL, "Internal SRAM0", 0x4000); // 16kB sram0
++    memory_region_init_ram(sram1, NULL, "Internal SRAM1", 0x4000); // 16kB sram1
++    memory_region_init_ram(sdram, NULL, "SDRAM", 0x8000000);         // 128MB sdram
 +    vmstate_register_ram_global(sram0);
 +    vmstate_register_ram_global(sram1);
 +    vmstate_register_ram_global(sdram);
@@ -533,34 +594,29 @@ index 0000000000..4ac90eb157
 +
 +
 +    portuxg20_binfo.ram_size = ram_size;
++    portuxg20_binfo.kernel_filename = kernel_filename;
++    portuxg20_binfo.kernel_cmdline = kernel_cmdline;
++    portuxg20_binfo.initrd_filename = initrd_filename;
 +    portuxg20_binfo.board_id = 0x88F; //auf seite arm.linux.org.uk/developer/machines/ zu finden
 +    portuxg20_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
-+    arm_load_kernel(cpu, machine, &portuxg20_binfo);
++    arm_load_kernel(cpu, &portuxg20_binfo);
 +}
 +
-+static void portuxg20_class_init(ObjectClass *oc, void *data)
-+{
-+    MachineClass *mc = MACHINE_CLASS(oc);
 +
-+    mc->desc = "ARM Taskit PortuxG20 (ARM926EJ-S)";
-+    mc->init = portuxg20_init;
-+    //mc->block_default_type = IF_SCSI; XXX ?
-+    //mc->ignore_memory_transaction_failures = true;
-+    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
-+}
-+
-+static const TypeInfo portuxg20_type = {
-+    .name = MACHINE_TYPE_NAME("portuxg20"),
-+    .parent = TYPE_MACHINE,
-+    .class_init = portuxg20_class_init,
++static QEMUMachine portuxg20_machine = {
++    .name = "portuxg20",
++    .desc = "ARM Taskit PortuxG20 (ARM926EJ-S)",
++    .init = portuxg20_init,
 +};
++
++
 +
 +static void portuxg20_machine_init(void)
 +{
-+    type_register_static(&portuxg20_type);
++    qemu_register_machine(&portuxg20_machine);
 +}
 +
-+type_init(portuxg20_machine_init);
++machine_init(portuxg20_machine_init);
 diff --git a/hw/char/Makefile.objs b/hw/char/Makefile.objs
 index 02d8a66925..950d25016f 100644
 --- a/hw/char/Makefile.objs
@@ -577,10 +633,10 @@ index 02d8a66925..950d25016f 100644
  common-obj-$(CONFIG_GRLIB) += grlib_apbuart.o
 diff --git a/hw/char/at91dbgu.c b/hw/char/at91dbgu.c
 new file mode 100644
-index 0000000000..59ccb08993
+index 0000000000..500db3e9e1
 --- /dev/null
 +++ b/hw/char/at91dbgu.c
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,424 @@
 +/*
 + * Debug Unit
 + *
@@ -588,12 +644,9 @@ index 0000000000..59ccb08993
 + * Every baud rate work; no parity checks.
 + */
 +
-+#include "qemu/osdep.h"
-+#include "migration/vmstate.h"
-+#include "hw/qdev-properties.h"
-+#include "hw/irq.h"
++
 +#include "hw/sysbus.h"
-+#include "chardev/char-fe.h"
++#include "sysemu/char.h"
 +
 +#define TYPE_AT91DBGU "at91dbgu"
 +#define AT91DBGU(obj) OBJECT_CHECK(at91dbgu_state, (obj), TYPE_AT91DBGU)
@@ -602,7 +655,7 @@ index 0000000000..59ccb08993
 +    SysBusDevice parent_obj;
 +    MemoryRegion iomem;
 +    qemu_irq irq;
-+    CharBackend chr;
++    CharDriverState *chr;
 +
 +    // DBGU Register
 +    uint32_t cr;
@@ -717,7 +770,9 @@ index 0000000000..59ccb08993
 +{
 +    at91dbgu_state *s = opaque;
 +
-+    qemu_chr_fe_write(&s->chr, buf, size);
++    if (s->chr) {
++        qemu_chr_fe_write(s->chr, buf, size);
++    }
 +}
 +
 +static void at91dbgu_update(at91dbgu_state *s)
@@ -952,14 +1007,14 @@ index 0000000000..59ccb08993
 +    .endianness = DEVICE_NATIVE_ENDIAN,
 +};
 +
-+static void at91dbgu_init(Object *obj)
++static int at91dbgu_init(SysBusDevice *dev)
 +{
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-+    at91dbgu_state *s = AT91DBGU(obj);
-+
++    at91dbgu_state *s = AT91DBGU(dev);
 +    memory_region_init_io(&s->iomem, OBJECT(s), &at91dbgu_ops, s, "at91dbgu", 0x200);
-+    sysbus_init_mmio(sbd, &s->iomem);
-+    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_mmio(dev, &s->iomem);
++    sysbus_init_irq(dev, &s->irq);
++
++    s->chr = qemu_char_get_next_serial();
 +
 +    // DBGU
 +    s->cr = TXEN | RXEN; /* Should be zero */
@@ -979,35 +1034,24 @@ index 0000000000..59ccb08993
 +    s->periph_tnpr = 0x0;
 +    s->periph_tncr = 0x0;
 +    s->periph_ptsr = 0x0;
++
++    if (s->chr) {
++        qemu_chr_add_handlers(s->chr, at91dbgu_can_receive, at91dbgu_receive, at91dbgu_event, s);
++    }
++
++    return 0;
 +}
-+
-+static void at91dbgu_realize(DeviceState *dev, Error **errp)
-+{
-+    at91dbgu_state *s = AT91DBGU(dev);
-+
-+    qemu_chr_fe_set_handlers(&s->chr, at91dbgu_can_receive, at91dbgu_receive,
-+            at91dbgu_event, NULL, s, NULL, true);
-+}
-+
-+static Property at91dbgu_properties[] = {
-+    DEFINE_PROP_CHR("chardev", at91dbgu_state, chr),
-+    DEFINE_PROP_END_OF_LIST(),
-+};
 +
 +static void at91dbgu_class_init(ObjectClass *klass, void *data)
 +{
-+    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    dc->realize = at91dbgu_realize;
-+    dc->vmsd = &vmstate_at91dbgu;
-+    dc->props = at91dbgu_properties;
++    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
++    sdc->init = at91dbgu_init;
 +}
 +
 +static const TypeInfo at91dbgu_info = {
 +    .name          = TYPE_AT91DBGU,
 +    .parent        = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91dbgu_state),
-+    .instance_init = at91dbgu_init,
 +    .class_init    = at91dbgu_class_init,
 +};
 +
@@ -1019,21 +1063,16 @@ index 0000000000..59ccb08993
 +type_init(at91dbgu_register_types)
 diff --git a/hw/char/at91usart.c b/hw/char/at91usart.c
 new file mode 100644
-index 0000000000..052d275663
+index 0000000000..75d4b29862
 --- /dev/null
 +++ b/hw/char/at91usart.c
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,331 @@
 +/*
 + * Portux920t USART
 + */
 +
-+#include "qemu/osdep.h"
-+#include "hw/qdev-properties.h"
-+#include "hw/irq.h"
-+#include "migration/vmstate.h"
 +#include "hw/sysbus.h"
-+#include "chardev/char.h"
-+#include "chardev/char-fe.h"
++#include "sysemu/char.h"
 +
 +/* Control Register */
 +#define CR_RXEN (1<<4)
@@ -1063,7 +1102,7 @@ index 0000000000..052d275663
 +    uint32_t imr;
 +    uint32_t csr;
 +    uint32_t rhr;
-+    CharBackend chr;
++    CharDriverState *chr;
 +    qemu_irq irq;
 +    const unsigned char *id;
 +    //DMA Register
@@ -1180,11 +1219,13 @@ index 0000000000..052d275663
 +        break;
 +    case 0x1C: /* US_THR */
 +        ch = value;
-+        if(s->cr & CR_TXEN){
-+            s->csr&=~CSR_TXRDY; //upon writing a char into the thr register set transmitter ready bit in the csr to 0
-+            qemu_chr_fe_write(&s->chr, &ch, 1);
-+            if(!(s->cr&CR_TXDIS))s->csr|=CSR_TXRDY;// set transmitter ready bit in the csr wieder to 1
-+            at91usart_update(s,1);
++        if(s->chr){
++            if(s->cr & CR_TXEN){
++                s->csr&=~CSR_TXRDY; //upon writing a char into the thr register set transmitter ready bit in the csr to 0
++                qemu_chr_fe_write(s->chr, &ch, 1);
++                if(!(s->cr&CR_TXDIS))s->csr|=CSR_TXRDY;// set transmitter ready bit in the csr wieder to 1
++                at91usart_update(s,1);
++            }
 +        }
 +        break;
 +    case 0x20: /* US_BRGR (not implemented) */
@@ -1242,9 +1283,11 @@ index 0000000000..052d275663
 +                s->periph_ptsr|=(1<<8);
 +                void * buf = malloc(sizeof(uint8_t)*1024);
 +                cpu_physical_memory_read(s->periph_tpr,buf,s->periph_tcr);
-+                //qemu_chr_fe_open(&s->chr);
-+                qemu_chr_fe_write(&s->chr,buf,s->periph_tcr);
-+                //qemu_chr_fe_close(&s->chr);
++                if(s->chr){
++                    //qemu_chr_fe_open(s->chr);
++                    qemu_chr_fe_write(s->chr,buf,s->periph_tcr);
++                    //qemu_chr_fe_close(s->chr);
++                }
 +            }
 +        }
 +
@@ -1314,46 +1357,37 @@ index 0000000000..052d275663
 +    }
 +};
 +
-+static void at91usart_init(Object *obj)
++static int at91usart_init(SysBusDevice *sbd)
 +{
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-+    at91usart_state *s = AT91USART(obj);
++    DeviceState *dev = DEVICE(sbd);
++    at91usart_state *s = AT91USART(dev);
 +
 +    memory_region_init_io(&s->iomem, OBJECT(s), &at91usart_ops, s, "at91usart", 0x1000);
 +    sysbus_init_mmio(sbd, &s->iomem);
 +    sysbus_init_irq(sbd, &s->irq);
++    s->chr = qemu_char_get_next_serial();
 +    s->cr = 0x0;
 +    s->csr = (1<<4); //Always set the End of Transfer signal to active
++    if (s->chr) {
++        qemu_chr_add_handlers(s->chr, at91usart_can_receive, at91usart_receive,
++                              at91usart_event, s);
++    }
++    vmstate_register(dev, -1, &vmstate_at91usart, s);
++    return 0;
 +}
 +
-+static void at91usart_realize(DeviceState *dev, Error **errp)
++static void at91usart_arm_class_init(ObjectClass *klass, void *data)
 +{
-+    at91usart_state *s = AT91USART(dev);
++    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    qemu_chr_fe_set_handlers(&s->chr, at91usart_can_receive, at91usart_receive,
-+                              at91usart_event, NULL, s, NULL, true);
-+}
-+
-+static Property at91usart_properties[] = {
-+    DEFINE_PROP_CHR("chardev", at91usart_state, chr),
-+    DEFINE_PROP_END_OF_LIST(),
-+};
-+
-+static void at91usart_class_init(ObjectClass *klass, void *data)
-+{
-+    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    dc->realize = at91usart_realize;
-+    dc->vmsd = &vmstate_at91usart;
-+    dc->props = at91usart_properties;
++    sdc->init = at91usart_init;
 +}
 +
 +static const TypeInfo at91usart_info = {
 +    .name          = TYPE_AT91USART,
 +    .parent        = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91usart_state),
-+    .instance_init = at91usart_init,
-+    .class_init    = at91usart_class_init,
++    .class_init    = at91usart_arm_class_init,
 +};
 +
 +
@@ -1365,10 +1399,10 @@ index 0000000000..052d275663
 +
 +type_init(at91usart_register_types)
 diff --git a/hw/display/Makefile.objs b/hw/display/Makefile.objs
-index 5a4066383b..1264d659af 100644
+index f2182e3bef..f969599599 100644
 --- a/hw/display/Makefile.objs
 +++ b/hw/display/Makefile.objs
-@@ -42,6 +42,8 @@ common-obj-$(CONFIG_NEXTCUBE) += next-fb.o
+@@ -43,6 +43,8 @@ common-obj-$(CONFIG_NEXTCUBE) += next-fb.o
  
  obj-$(CONFIG_VGA) += vga.o
  
@@ -1379,103 +1413,96 @@ index 5a4066383b..1264d659af 100644
  obj-$(CONFIG_VIRTIO_GPU) += virtio-gpu-base.o virtio-gpu.o virtio-gpu-3d.o
 diff --git a/hw/display/at91display.c b/hw/display/at91display.c
 new file mode 100644
-index 0000000000..9a0a323ace
+index 0000000000..57ed207531
 --- /dev/null
 +++ b/hw/display/at91display.c
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,86 @@
 +/**
 + * Portux920T display a,b and c
 + */
-+
-+#include "qemu/osdep.h"
-+#include "migration/vmstate.h"
 +#include "hw/sysbus.h"
 +
 +#define TYPE_AT91DISPLAY "at91display"
-+#define AT91DISPLAY(obj) OBJECT_CHECK(at91display_state, (obj), TYPE_AT91DISPLAY)
++#define AT91DISPLAY(obj) OBJECT_CHECK(display_state, (obj), TYPE_AT91DISPLAY)
 +
 +typedef struct {
 +    SysBusDevice parent_obj;
 +    MemoryRegion iomem;
 +    uint32_t charreg;
-+} at91display_state;
++} display_state;
 +
-+static uint64_t at91display_read(void *opaque, hwaddr offset, unsigned size)
++static uint64_t display_read(void *opaque, hwaddr offset, unsigned size)
 +{
 +    return 0;
 +}
 +
-+static void at91display_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++static void display_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 +{
-+    at91display_state *s = (at91display_state *)opaque;
++    display_state *s = (display_state *)opaque;
 +
 +    //TODO: Don't write if Chipselect is LOW?
 +    /*printf("\nW:%c",(char)value);
 +    fflush(0);*/
 +    switch (offset) {
-+        case 0: //at91display enable register
-+            s->charreg = value; //der value wird ins at91display status register eingetragen
++        case 0: //display enable register
++            s->charreg = value; //der value wird ins display status register eingetragen
 +            unsigned int buf[1];
 +            buf[0]=value;
 +            cpu_physical_memory_write(0xfffff500,buf,1);
 +            break;
 +        default:
-+            fprintf(stderr, "at91display A Write: Bad offset %x\n", (int)offset);
++            fprintf(stderr, "display A Write: Bad offset %x\n", (int)offset);
 +    }
 +}
 +
 +
-+static const MemoryRegionOps at91display_ops = {
-+    .read = at91display_read,
-+    .write = at91display_write,
++static const MemoryRegionOps display_ops = {
++    .read = display_read,
++    .write = display_write,
 +    .endianness = DEVICE_NATIVE_ENDIAN,
 +};
 +
-+static const VMStateDescription vmstate_at91display = {
++static const VMStateDescription vmstate_display = {
 +    .name = "at91display",
 +    .version_id = 1,
 +    .minimum_version_id = 1,
 +    .minimum_version_id_old = 1,
 +    .fields      = (VMStateField[]) {
-+        VMSTATE_UINT32(charreg, at91display_state),
++        VMSTATE_UINT32(charreg, display_state),
 +        VMSTATE_END_OF_LIST()
 +    }
 +};
 +
-+static void at91display_init(Object *obj)
++static int display_init(SysBusDevice *dev)
 +{
-+    at91display_state *s = AT91DISPLAY(obj);
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-+
-+    memory_region_init_io(&s->iomem, obj, &at91display_ops, s, "at91display", 0x40);
-+    sysbus_init_mmio(sbd, &s->iomem);
++    display_state *s = AT91DISPLAY(dev);
++    memory_region_init_io(&s->iomem, OBJECT(s), &display_ops, s, "at91display", 0x40);
++    sysbus_init_mmio(dev, &s->iomem);
++    return 0;
 +}
 +
-+static void at91display_class_init(ObjectClass *klass, void *data)
++static void display_class_init(ObjectClass *klass, void *data)
 +{
-+    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
-+    dc->vmsd = &vmstate_at91display;
++    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
++    sdc->init = display_init;
 +}
 +
-+static const TypeInfo at91display_info = {
++static const TypeInfo display_info = {
 +    .name          = TYPE_AT91DISPLAY,
 +    .parent        = TYPE_SYS_BUS_DEVICE,
-+    .instance_size = sizeof(at91display_state),
-+    .instance_init = at91display_init,
-+    .class_init    = at91display_class_init,
++    .instance_size = sizeof(display_state),
++    .class_init    = display_class_init,
 +};
 +
-+static void at91display_register_types(void)
++static void display_register_types(void)
 +{
 +    //Achtung! Hier können auch mehrere verschiedene TypeInfos angegeben werden!
-+    type_register_static(&at91display_info);
++    type_register_static(&display_info);
 +}
 +
 +
 +
-+type_init(at91display_register_types)
++type_init(display_register_types)
 diff --git a/hw/gpio/Makefile.objs b/hw/gpio/Makefile.objs
 index d305b3b24b..75e2cac984 100644
 --- a/hw/gpio/Makefile.objs
@@ -1487,18 +1514,15 @@ index d305b3b24b..75e2cac984 100644
 +obj-$(CONFIG_PORTUX) += at91pio.o
 diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
 new file mode 100644
-index 0000000000..3f402c1201
+index 0000000000..545764def3
 --- /dev/null
 +++ b/hw/gpio/at91pio.c
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,354 @@
 +/**
 + * Portux920T PIO a,b and c
 + */
-+
-+#include "qemu/osdep.h"
-+#include "migration/vmstate.h"
 +#include "hw/sysbus.h"
-+#include "chardev/char-fe.h"
++#include "sysemu/char.h"
 +
 +#define TYPE_AT91PIO "at91pio"
 +#define AT91PIO(obj) OBJECT_CHECK(at91pio_state, (obj), TYPE_AT91PIO)
@@ -1527,7 +1551,7 @@ index 0000000000..3f402c1201
 +} at91pio_state;
 +
 +//KBS-Special-Telnet-Client
-+Chardev *char_kbs;
++CharDriverState *char_kbs;
 +extern int pio_telnet;
 +
 +static uint64_t at91pio_read(void *opaque, hwaddr offset, unsigned size)
@@ -1742,7 +1766,7 @@ index 0000000000..3f402c1201
 +            //TODO: Nur wenn wirklich etwas neugezeichnet werden soll
 +            if(pio_telnet){
 +                // Clear Telnet Display
-+                qemu_chr_fe_printf(char_kbs->be,"\033[2J\033[1;1H");
++                qemu_chr_fe_printf(char_kbs,"\033[2J\033[1;1H");
 +
 +                /**
 +                 * LED CONTROL
@@ -1761,22 +1785,22 @@ index 0000000000..3f402c1201
 +                if((pioc_ctrl&1)!=1){
 +                    strcpy(red_led, "\033[1;40m\033[1;31m_\033[0m");
 +                }
-+                qemu_chr_fe_printf(char_kbs->be,"\r\nLED: %s%s%s",yellow_led, green_led, red_led);
++                qemu_chr_fe_printf(char_kbs,"\r\nLED: %s%s%s",yellow_led, green_led, red_led);
 +
 +                /**
 +                 * DISPLAY
 +                 */
 +
-+                qemu_chr_fe_printf(char_kbs->be,"\r\n*** DISPLAY ****\r\n");
++                qemu_chr_fe_printf(char_kbs,"\r\n*** DISPLAY ****\r\n");
 +                int row_starts[]={0,64,16,80};
 +                for(i=0;i<4;i++){
 +                    /*for(j=0;j<16;j++){
-+                        qemu_chr_fe_printf(char_kbs->be,"%c",s->display[j+row_starts[i]]);
++                        qemu_chr_fe_printf(char_kbs,"%c",s->display[j+row_starts[i]]);
 +                    }*/
-+                    qemu_chr_fe_write(char_kbs->be,&(s->display[row_starts[i]]),16);
-+                    qemu_chr_fe_printf(char_kbs->be,"\r\n");
++                    qemu_chr_fe_write(char_kbs,&(s->display[row_starts[i]]),16);
++                    qemu_chr_fe_printf(char_kbs,"\r\n");
 +                }
-+                qemu_chr_fe_printf(char_kbs->be,"*END OF DISPLAY*\r\n");
++                qemu_chr_fe_printf(char_kbs,"*END OF DISPLAY*\r\n");
 +            }
 +}
 +
@@ -1787,7 +1811,7 @@ index 0000000000..3f402c1201
 +    .endianness = DEVICE_NATIVE_ENDIAN,
 +};
 +
-+static const VMStateDescription vmstate_at91pio = {
++static const VMStateDescription vmstate_pio = {
 +    .name = "at91pio",
 +    .version_id = 1,
 +    .minimum_version_id = 1,
@@ -1808,37 +1832,34 @@ index 0000000000..3f402c1201
 +    }
 +};
 +
-+static void at91pio_init(Object *obj)
++static int at91pio_init(SysBusDevice *dev)
 +{
-+    at91pio_state *s = AT91PIO(obj);
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-+
-+    memory_region_init_io(&s->iomem, obj, &at91pio_ops, s, "at91pio", 0x5FF);
-+    sysbus_init_mmio(sbd, &s->iomem);
-+    sysbus_init_irq(sbd, &s->irq);
-+
-+    for (int i=0; i<128; i++){
-+        s->display[i]='\0';
++    at91pio_state *s = AT91PIO(dev);
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91pio_ops, s, "at91pio", 0x5FF);
++    sysbus_init_mmio(dev, &s->iomem);
++    sysbus_init_irq(dev, &s->irq);
++    int i = 0;
++    for(i=0; i<128; i++){
++    s->display[i]='\0';
 +    }
 +    s->display_pos=0;
 +    //Telnet-Client for LCD and LED Output. Port 44444
 +    if(pio_telnet!=0){
-+        char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server", NULL);
++    char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server", NULL);
 +    }
++    return 0;
 +}
 +
 +static void at91pio_class_init(ObjectClass *klass, void *data)
 +{
-+    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    dc->vmsd = &vmstate_at91pio;
++    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
++    sdc->init = at91pio_init;
 +}
 +
 +static const TypeInfo at91pio_info = {
 +    .name          = TYPE_AT91PIO,
 +    .parent        = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91pio_state),
-+    .instance_init = at91pio_init,
 +    .class_init    = at91pio_class_init,
 +};
 +
@@ -1862,10 +1883,10 @@ index f726d87532..ad178f9056 100644
 +obj-$(CONFIG_PORTUX) += at91aic.o at91_intor.o
 diff --git a/hw/intc/at91_intor.c b/hw/intc/at91_intor.c
 new file mode 100644
-index 0000000000..3f309eaa06
+index 0000000000..3598ef1360
 --- /dev/null
 +++ b/hw/intc/at91_intor.c
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,100 @@
 +/*
 + * AT91 Interrupt Logic OR
 + *
@@ -1890,9 +1911,6 @@ index 0000000000..3f309eaa06
 + * THE SOFTWARE.
 + */
 +
-+#include "qemu/osdep.h"
-+#include "migration/vmstate.h"
-+#include "hw/irq.h"
 +#include "hw/sysbus.h"
 +
 +#define TYPE_AT91_INTOR "at91_intor"
@@ -1923,16 +1941,16 @@ index 0000000000..3f309eaa06
 +    s->sources = 0;
 +}
 +
-+static void at91_intor_init(Object *obj)
++static int at91_intor_init(SysBusDevice *sbd)
 +{
-+    DeviceState *dev = DEVICE(obj);
-+    at91_intor_state *s = AT91_INTOR(obj);
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    DeviceState *dev = DEVICE(sbd);
++    at91_intor_state *s = AT91_INTOR(dev);
 +
 +    qdev_init_gpio_in(dev, at91_intor_set_irq, 32);
 +    sysbus_init_irq(sbd, &s->parent_irq);
 +
 +    at91_intor_reset(dev);    // FIXME: Is this necessary?
++    return 0;
 +}
 +
 +static const VMStateDescription vmstate_at91_intor = {
@@ -1948,8 +1966,9 @@ index 0000000000..3f309eaa06
 +static void at91_intor_class_init(ObjectClass *klass, void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    dc->user_creatable = false; /* FIXME explain why */
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
++    k->init = at91_intor_init;
++    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
 +    dc->reset = at91_intor_reset;
 +    dc->vmsd = &vmstate_at91_intor;
 +}
@@ -1958,7 +1977,6 @@ index 0000000000..3f309eaa06
 +    .name = TYPE_AT91_INTOR,
 +    .parent = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91_intor_state),
-+    .instance_init = at91_intor_init,
 +    .class_init = at91_intor_class_init,
 +};
 +
@@ -1971,10 +1989,10 @@ index 0000000000..3f309eaa06
 +
 diff --git a/hw/intc/at91aic.c b/hw/intc/at91aic.c
 new file mode 100644
-index 0000000000..504483f022
+index 0000000000..0a05dde08a
 --- /dev/null
 +++ b/hw/intc/at91aic.c
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,381 @@
 +/*
 + * Atmel AT91SAM7XC Advanced Interrupt Controller emulation.
 + *
@@ -1988,9 +2006,6 @@ index 0000000000..504483f022
 + * This code is licenced under the GPL.
 + */
 +
-+#include "qemu/osdep.h"
-+#include "hw/irq.h"
-+#include "migration/vmstate.h"
 +#include <stdio.h>
 +#include <stddef.h>
 +
@@ -2002,7 +2017,6 @@ index 0000000000..504483f022
 +
 +typedef struct {
 +    SysBusDevice parent_obj;
-+
 +    MemoryRegion iomem;
 +    qemu_irq irq;
 +    qemu_irq fiq;
@@ -2323,26 +2337,26 @@ index 0000000000..504483f022
 +    at91aic_update(s);
 +}
 +
-+static void at91aic_init(Object *obj)
++static int at91aic_init(SysBusDevice *sbd)
 +{
-+    DeviceState *dev = DEVICE(obj);
-+    at91aic_state *s = AT91AIC(obj);
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-+
-+    memory_region_init_io(&s->iomem, obj, &at91aic_ops, s, "at91aic", 0x1FF);
++    DeviceState *dev = DEVICE(sbd);
++    at91aic_state *s = AT91AIC(dev);
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91aic_ops, s, "at91aic", 0x1FF);
 +    sysbus_init_mmio(sbd, &s->iomem);
 +    qdev_init_gpio_in(dev, at91aic_set_irq, 32);
 +    sysbus_init_irq(sbd, &s->irq);
 +    sysbus_init_irq(sbd, &s->fiq);
 +
 +    at91aic_reset(dev);
++    return 0;
 +}
 +
 +static void at91aic_class_init(ObjectClass *klass, void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
-+
-+    dc->user_creatable = false;
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
++    k->init = at91aic_init;
++    dc->cannot_instantiate_with_device_add_yet = true;
 +    dc->reset = at91aic_reset;
 +    dc->vmsd = &vmstate_at91aic;
 +}
@@ -2351,7 +2365,6 @@ index 0000000000..504483f022
 +    .name = TYPE_AT91AIC,
 +    .parent = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91aic_state),
-+    .instance_init = at91aic_init,
 +    .class_init = at91aic_class_init,
 +};
 +
@@ -2361,25 +2374,11 @@ index 0000000000..504483f022
 +}
 +
 +type_init(at91aic_register_types)
-diff --git a/hw/net/Kconfig b/hw/net/Kconfig
-index 4ef86dc3a5..70c182b558 100644
---- a/hw/net/Kconfig
-+++ b/hw/net/Kconfig
-@@ -126,3 +126,9 @@ config CAN_SJA1000
-     default y if PCI_DEVICES
-     depends on PCI
-     select CAN_BUS
-+
-+config AT91EMAC
-+    bool
-+
-+config AT91G20EMAC
-+    bool
 diff --git a/hw/net/Makefile.objs b/hw/net/Makefile.objs
-index 9904273b06..d496a90101 100644
+index 7907d2c199..c3e1e85144 100644
 --- a/hw/net/Makefile.objs
 +++ b/hw/net/Makefile.objs
-@@ -31,6 +31,9 @@ common-obj-$(CONFIG_SUNHME) += sunhme.o
+@@ -32,6 +32,9 @@ common-obj-$(CONFIG_SUNHME) += sunhme.o
  common-obj-$(CONFIG_FTGMAC100) += ftgmac100.o
  common-obj-$(CONFIG_SUNGEM) += sungem.o
  
@@ -2391,7 +2390,7 @@ index 9904273b06..d496a90101 100644
  obj-$(CONFIG_MILKYMIST) += milkymist-minimac2.o
 diff --git a/hw/net/at91emac.c b/hw/net/at91emac.c
 new file mode 100644
-index 0000000000..68db6f296e
+index 0000000000..2e9c355509
 --- /dev/null
 +++ b/hw/net/at91emac.c
 @@ -0,0 +1,744 @@
@@ -2432,12 +2431,9 @@ index 0000000000..68db6f296e
 + * sending, ...
 + */
 +
-+#include "qemu/osdep.h"
 +#include "hw/sysbus.h"
-+#include "hw/qdev-properties.h"
-+#include "migration/vmstate.h"
 +#include "net/net.h"
-+#include "hw/net/at91emac.h"
++#include "hw/devices.h"
 +
 +/* #define DEBUG_EMAC */
 +
@@ -3047,7 +3043,7 @@ index 0000000000..68db6f296e
 +}
 +
 +static NetClientInfo net_at91emac_info = {
-+    .type = NET_CLIENT_DRIVER_NIC,
++    .type = NET_CLIENT_OPTIONS_KIND_NIC,
 +    .size = sizeof(NICState),
 +    .can_receive = at91emac_can_receive,
 +    .receive = at91emac_receive,
@@ -3100,12 +3096,13 @@ index 0000000000..68db6f296e
 +    sysbus_connect_irq(s, 0, irq);
 +}
 +
-+static void at91emac_realize(DeviceState *dev, Error **errp)
++static int at91emac_init(SysBusDevice *sbd)
 +{
++    DeviceState *dev = DEVICE(sbd);
 +    at91emac_state *s = AT91EMAC(dev);
 +    memory_region_init_io(&s->iomem, OBJECT(s), &at91emac_mem_ops, s, "at91emac", 0x1000);
-+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
-+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
 +    qemu_macaddr_default_if_unset(&s->conf.macaddr);
 +    s->nic = qemu_new_nic(&net_at91emac_info, &s->conf,
 +                          object_get_typename(OBJECT(dev)), dev->id, s);
@@ -3115,12 +3112,14 @@ index 0000000000..68db6f296e
 +    s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
 +    s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
 +    at91emac_reset(dev);
++    return 0;
 +}
 +
 +static void at91emac_class_init(ObjectClass *klass, void *data){
 +    DeviceClass *dc = DEVICE_CLASS(klass);
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    dc->realize = at91emac_realize;
++    k->init = at91emac_init;
 +    dc->reset = at91emac_reset;
 +    dc->vmsd = &vmstate_at91emac;
 +    dc->props = at91emac_properties;
@@ -3141,10 +3140,10 @@ index 0000000000..68db6f296e
 +type_init(at91emac_register_types)
 diff --git a/hw/net/at91g20emac.c b/hw/net/at91g20emac.c
 new file mode 100644
-index 0000000000..49d97bb8d5
+index 0000000000..8c3c802760
 --- /dev/null
 +++ b/hw/net/at91g20emac.c
-@@ -0,0 +1,745 @@
+@@ -0,0 +1,743 @@
 +/*
 + * AT91 Ethernet MAC (for AT91RM9200)
 + *
@@ -3174,7 +3173,6 @@ index 0000000000..49d97bb8d5
 + * WARNING!
 + * This is written for the AT91RM9200 which has a different behavior than all
 + * the other (or most, we don't know) AT91-boards. So have a look in your documentation.
-+ * XXX wrong...
 + */
 +
 +/*
@@ -3183,12 +3181,9 @@ index 0000000000..49d97bb8d5
 + * sending, ...
 + */
 +
-+#include "qemu/osdep.h"
 +#include "hw/sysbus.h"
-+#include "hw/qdev-properties.h"
-+#include "migration/vmstate.h"
 +#include "net/net.h"
-+#include "hw/net/at91g20emac.h"
++#include "hw/devices.h"
 +
 +/* #define DEBUG_EMAC */
 +
@@ -3797,7 +3792,7 @@ index 0000000000..49d97bb8d5
 +}
 +
 +static NetClientInfo net_at91g20emac_info = {
-+    .type = NET_CLIENT_DRIVER_NIC,
++    .type = NET_CLIENT_OPTIONS_KIND_NIC,
 +    .size = sizeof(NICState),
 +    .can_receive = at91g20emac_can_receive,
 +    .receive = at91g20emac_receive,
@@ -3850,12 +3845,13 @@ index 0000000000..49d97bb8d5
 +    sysbus_connect_irq(s, 0, irq);
 +}
 +
-+static void at91g20emac_realize(DeviceState *dev, Error **erp)
++static int at91g20emac_init(SysBusDevice *sbd)
 +{
++    DeviceState *dev = DEVICE(sbd);
 +    at91g20emac_state *s = AT91G20EMAC(dev);
 +    memory_region_init_io(&s->iomem, OBJECT(s), &at91g20emac_mem_ops, s, "at91g20emac", 0x1000);
-+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
-+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
 +    qemu_macaddr_default_if_unset(&s->conf.macaddr);
 +    s->nic = qemu_new_nic(&net_at91g20emac_info, &s->conf,
 +                          object_get_typename(OBJECT(dev)), dev->id, s);
@@ -3865,17 +3861,18 @@ index 0000000000..49d97bb8d5
 +    s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
 +    s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
 +    at91g20emac_reset(dev);
++    return 0;
 +}
 +
 +static void at91g20emac_class_init(ObjectClass *klass, void *data){
 +    DeviceClass *dc = DEVICE_CLASS(klass);
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    dc->realize = at91g20emac_realize;
++    k->init = at91g20emac_init;
 +    dc->reset = at91g20emac_reset;
 +    dc->vmsd = &vmstate_at91g20emac;
 +    dc->props = at91g20emac_properties;
 +}
-+
 +
 +static const TypeInfo at91g20emac_info = {
 +    .name = TYPE_AT91G20EMAC,
@@ -3891,35 +3888,28 @@ index 0000000000..49d97bb8d5
 +
 +type_init(at91g20emac_register_types)
 diff --git a/hw/timer/Makefile.objs b/hw/timer/Makefile.objs
-index 123d92c969..b470622651 100644
+index dece235fd7..f85165c249 100644
 --- a/hw/timer/Makefile.objs
 +++ b/hw/timer/Makefile.objs
-@@ -47,3 +47,5 @@ common-obj-$(CONFIG_SUN4V_RTC) += sun4v-rtc.o
- common-obj-$(CONFIG_CMSDK_APB_TIMER) += cmsdk-apb-timer.o
+@@ -35,3 +35,5 @@ common-obj-$(CONFIG_CMSDK_APB_TIMER) += cmsdk-apb-timer.o
  common-obj-$(CONFIG_CMSDK_APB_DUALTIMER) += cmsdk-apb-dualtimer.o
  common-obj-$(CONFIG_MSF2) += mss-timer.o
+ common-obj-$(CONFIG_RASPI) += bcm2835_systmr.o
 +
-+obj-$(CONFIG_PORTUX) += at91st.o at91g20st.o
++common-obj-$(CONFIG_PORTUX) += at91st.o at91g20st.o
 diff --git a/hw/timer/at91g20st.c b/hw/timer/at91g20st.c
 new file mode 100644
-index 0000000000..ee82ba82d1
+index 0000000000..56388362ba
 --- /dev/null
 +++ b/hw/timer/at91g20st.c
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,355 @@
 +/*
 + * Timer for the portuxg20
 + * All timers!
 + */
 +
-+#include "qemu/osdep.h"
-+#include "qemu-common.h"
-+#include "sysemu/sysemu.h"
-+#include "sysemu/runstate.h"
-+#include "migration/vmstate.h"
-+#include "hw/irq.h"
 +#include "hw/sysbus.h"
 +#include "qemu/timer.h"
-+#include "qemu/cutils.h"
 +
 +#define TYPE_AT91G20ST "at91g20st"
 +#define AT91G20ST(obj) OBJECT_CHECK(at91g20st_state, (obj), TYPE_AT91G20ST)
@@ -4068,8 +4058,8 @@ index 0000000000..ee82ba82d1
 +
 +        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 +
-+        ticks = (((s->wdt_mr &0xFFF))/32768) + now / NANOSECONDS_PER_SECOND;
-+        timer_mod(s->wd_timer, now + ticks*NANOSECONDS_PER_SECOND/1000);
++        ticks = (((s->wdt_mr &0xFFF))/32768) + now / get_ticks_per_sec();
++        timer_mod(s->wd_timer, now + ticks*get_ticks_per_sec()/1000);
 +}
 +
 +static void wd_interrupt(void * opaque)
@@ -4161,10 +4151,9 @@ index 0000000000..ee82ba82d1
 +        s->rtt_vr+=(tmp -  s->time_last_change)/(hz*1000000);
 +        s->time_last_change=tmp;
 +        s->rtt_mr = value;
-+        if(value & (1<<18)) { //Reset and (maybe) restart clock
++        if(value & (1<<18)) //Reset and (maybe) restart clock
 +            s->startup_real_time = tmp;
-+            s->rtt_vr=0; // XXX this wasn't guarded by if, now is -- correct?
-+        }
++            s->rtt_vr=0;
 +        if(value & (1<<17))
 +            realtime_increment_set_alarm(s);
 +        if(value & (1<<16))
@@ -4205,15 +4194,15 @@ index 0000000000..ee82ba82d1
 +    .endianness = DEVICE_NATIVE_ENDIAN,
 +};
 +
-+static void at91g20st_realize(DeviceState *dev, Error **erp)
++static int at91g20st_init(SysBusDevice *dev)
 +{
 +    at91g20st_state *s = AT91G20ST(dev);
 +    struct tm tm;
 +
 +    memory_region_init_io(&s->iomem, OBJECT(s), &at91g20st_ops, s, "at91g20st", 0x30);
-+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_mmio(dev, &s->iomem);
 +
-+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
++    sysbus_init_irq(dev, &s->irq);
 +
 +    s->startup_real_time = s->time_last_change = qemu_clock_get_ns(QEMU_CLOCK_REALTIME); //Save the current timestamp
 +
@@ -4242,14 +4231,17 @@ index 0000000000..ee82ba82d1
 +    s->wdt_cr=0x0;
 +    s->wdt_mr=0x3FFF2FFF;
 +    s->wdt_sr=0x0;
++
++    return 0;
 +}
 +
 +static void at91g20st_class_init(ObjectClass *klass, void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    dc->realize = at91g20st_realize;
-+    dc->user_creatable = false; /* FIXME explain why */
++    k->init = at91g20st_init;
++    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
 +    dc->vmsd = &vmstate_at91g20st;
 +}
 +
@@ -4268,22 +4260,17 @@ index 0000000000..ee82ba82d1
 +type_init(at91g20st_register_types)
 diff --git a/hw/timer/at91st.c b/hw/timer/at91st.c
 new file mode 100644
-index 0000000000..85e6c615e3
+index 0000000000..5c231df10c
 --- /dev/null
 +++ b/hw/timer/at91st.c
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,302 @@
 +/*
 + * Atmel AT91RM9200 System Timer (ST)
 + */
 +
-+#include "qemu/osdep.h"
-+#include "qemu-common.h"
-+#include "migration/vmstate.h"
-+#include "sysemu/sysemu.h"
-+#include "sysemu/runstate.h"
-+#include "hw/irq.h"
 +#include "hw/sysbus.h"
 +#include "qemu/timer.h"
++#include "sysemu/sysemu.h"
 +
 +#define TYPE_AT91ST "at91st"
 +#define AT91ST(obj) OBJECT_CHECK(at91st_state, (obj), TYPE_AT91ST)
@@ -4377,7 +4364,7 @@ index 0000000000..85e6c615e3
 +    }
 +
 +    /* piv == 0x10000 => 2 second interval */
-+    t += NANOSECONDS_PER_SECOND * piv * 2 / 0x10000;
++    t += get_ticks_per_sec() * piv * 2 / 0x10000;
 +
 +    timer_mod(s->st_timer, t);
 +}
@@ -4400,7 +4387,7 @@ index 0000000000..85e6c615e3
 +        wdv = 0x10000;
 +
 +    /* wdv == 0x10000 => 256 second interval */
-+    t += NANOSECONDS_PER_SECOND * wdv * 256 / 0x10000;
++    t += get_ticks_per_sec() * wdv * 256 / 0x10000;
 +
 +    timer_mod(s->wd_timer, t);
 +}
@@ -4410,7 +4397,7 @@ index 0000000000..85e6c615e3
 +    at91st_state *s = opaque;
 +    s->sr |= WDOVF;
 +    if (s->wdmr & RSTEN) {
-+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++        qemu_system_reset_request();
 +    }
 +    wd_set_alarm(s);
 +    at91st_update(s);
@@ -4426,7 +4413,7 @@ index 0000000000..85e6c615e3
 +        rtpres = 0x10000;
 +
 +    /* rtpres == 0x10000 => 2 second interval */
-+    t += NANOSECONDS_PER_SECOND * rtpres * 2 / 0x10000;
++    t += get_ticks_per_sec() * rtpres * 2 / 0x10000;
 +
 +    timer_mod(s->rt_timer, t);
 +}
@@ -4536,31 +4523,32 @@ index 0000000000..85e6c615e3
 +    at91st_update(s);
 +}
 +
-+static void at91st_init(Object *obj)
++static int at91st_init(SysBusDevice *dev)
 +{
-+    DeviceState *dev = DEVICE(obj);
-+    at91st_state *s = AT91ST(obj);
-+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    at91st_state *s = AT91ST(dev);
 +    struct tm tm;
 +
-+    memory_region_init_io(&s->iomem, obj, &at91st_ops, s, "at91st", 0x1FF);
-+    sysbus_init_mmio(sbd, &s->iomem);
++    memory_region_init_io(&s->iomem, OBJECT(s), &at91st_ops, s, "at91st", 0x1FF);
++    sysbus_init_mmio(dev, &s->iomem);
 +
-+    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_irq(dev, &s->irq);
 +    qemu_get_timedate(&tm, 0);
 +
 +    s->st_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st_interrupt, s);
 +    s->wd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wd_interrupt, s);
 +    s->rt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rt_interrupt, s);
 +
-+    at91st_reset(dev); // is this needed ?
++    at91st_reset(DEVICE(dev));
++    return 0;
 +}
 +
 +static void at91st_class_init(ObjectClass *klass, void *data)
 +{
 +    DeviceClass *dc = DEVICE_CLASS(klass);
++    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 +
-+    dc->user_creatable = false; /* FIXME explain why */
++    k->init = at91st_init;
++    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
 +    dc->reset = at91st_reset;
 +    dc->vmsd = &vmstate_at91st;
 +}
@@ -4569,7 +4557,6 @@ index 0000000000..85e6c615e3
 +    .name          = TYPE_AT91ST,
 +    .parent        = TYPE_SYS_BUS_DEVICE,
 +    .instance_size = sizeof(at91st_state),
-+    .instance_init = at91st_init,
 +    .class_init    = at91st_class_init,
 +};
 +
@@ -4579,66 +4566,6 @@ index 0000000000..85e6c615e3
 +}
 +
 +type_init(at91st_register_types)
-diff --git a/include/hw/char/at91.h b/include/hw/char/at91.h
-new file mode 100644
-index 0000000000..af92574fb9
---- /dev/null
-+++ b/include/hw/char/at91.h
-@@ -0,0 +1,54 @@
-+/*
-+ * This program is free software; you can redistribute it and/or modify it
-+ * under the terms and conditions of the GNU General Public License,
-+ * version 2 or later, as published by the Free Software Foundation.
-+ *
-+ * This program is distributed in the hope it will be useful, but WITHOUT
-+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-+ * more details.
-+ *
-+ * You should have received a copy of the GNU General Public License along with
-+ * this program.  If not, see <http://www.gnu.org/licenses/>.
-+ */
-+
-+#ifndef HW_AT91_H
-+#define HW_AT91_H
-+
-+#include "hw/qdev-properties.h"
-+
-+static inline DeviceState *at91dbgu_create(hwaddr addr,
-+                                        qemu_irq irq,
-+                                        Chardev *chr)
-+{
-+    DeviceState *dev;
-+    SysBusDevice *s;
-+
-+    dev = qdev_create(NULL, "at91dbgu");
-+    s = SYS_BUS_DEVICE(dev);
-+    qdev_prop_set_chr(dev, "chardev", chr);
-+    qdev_init_nofail(dev);
-+    sysbus_mmio_map(s, 0, addr);
-+    sysbus_connect_irq(s, 0, irq);
-+
-+    return dev;
-+}
-+
-+static inline DeviceState *at91usart_create(hwaddr addr,
-+                                                 qemu_irq irq,
-+                                                 Chardev *chr)
-+{
-+    DeviceState *dev;
-+    SysBusDevice *s;
-+
-+    dev = qdev_create(NULL, "at91usart");
-+    s = SYS_BUS_DEVICE(dev);
-+    qdev_prop_set_chr(dev, "chardev", chr);
-+    qdev_init_nofail(dev);
-+    sysbus_mmio_map(s, 0, addr);
-+    sysbus_connect_irq(s, 0, irq);
-+
-+    return dev;
-+}
-+
-+#endif
 diff --git a/include/hw/net/at91emac.h b/include/hw/net/at91emac.h
 new file mode 100644
 index 0000000000..634a13fc91
@@ -4717,46 +4644,11 @@ index 0000000000..bb63aea0fa
 +void at91g20emac_init1(NICInfo *, uint32_t, qemu_irq);
 +
 +#endif
-diff --git a/include/sysemu/sysemu.h b/include/sysemu/sysemu.h
-index 44f18eb739..fc065faba1 100644
---- a/include/sysemu/sysemu.h
-+++ b/include/sysemu/sysemu.h
-@@ -85,7 +85,7 @@ int serial_max_hds(void);
- 
- /* parallel ports */
- 
--#define MAX_PARALLEL_PORTS 3
-+#define MAX_PARALLEL_PORTS 7
- 
- extern Chardev *parallel_hds[MAX_PARALLEL_PORTS];
- 
-diff --git a/qemu-options.hx b/qemu-options.hx
-index 996b6fba74..dcc62c9616 100644
---- a/qemu-options.hx
-+++ b/qemu-options.hx
-@@ -1604,6 +1604,17 @@ debug a Linux kernel with a serial console. Use @key{C-a h} for help on
- switching between the console and monitor.
- ETEXI
- 
-+
-+DEF("piotelnet", 0, QEMU_OPTION_piotelnet,
-+    "-piotelnet	open a telnet server at port 444444 for the LEDs and the LCD on the Portux920T-MiniPC. Only useful there\n",
-+    QEMU_ARCH_ALL)
-+STEXI
-+@item -piotelnet
-+@findex -piotelnet
-+Opens a telnet server at port 444444 for the LEDs and the LCD on
-+the Portux920T-MiniPC. Only useful there.
-+ETEXI
-+
- DEF("curses", 0, QEMU_OPTION_curses,
-     "-curses         shorthand for -display curses\n",
-     QEMU_ARCH_ALL)
 diff --git a/target/arm/cpu.c b/target/arm/cpu.c
-index 13813fb213..6b75d65afe 100644
+index 7a4ac9339b..e420c214f8 100644
 --- a/target/arm/cpu.c
 +++ b/target/arm/cpu.c
-@@ -1676,6 +1676,17 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
+@@ -1697,6 +1697,17 @@ static ObjectClass *arm_cpu_class_by_name(const char *cpu_model)
  /* CPU models. These are not needed for the AArch64 linux-user build. */
  #if !defined(CONFIG_USER_ONLY) || !defined(TARGET_AARCH64)
  
@@ -4774,7 +4666,7 @@ index 13813fb213..6b75d65afe 100644
  static void arm926_initfn(Object *obj)
  {
      ARMCPU *cpu = ARM_CPU(obj);
-@@ -2521,6 +2532,7 @@ struct ARMCPUInfo {
+@@ -2542,6 +2553,7 @@ struct ARMCPUInfo {
  
  static const ARMCPUInfo arm_cpus[] = {
  #if !defined(CONFIG_USER_ONLY) || !defined(TARGET_AARCH64)
@@ -4782,25 +4674,3373 @@ index 13813fb213..6b75d65afe 100644
      { .name = "arm926",      .initfn = arm926_initfn },
      { .name = "arm946",      .initfn = arm946_initfn },
      { .name = "arm1026",     .initfn = arm1026_initfn },
-diff --git a/vl.c b/vl.c
-index 4489cfb2bb..c0d7f0c5ee 100644
---- a/vl.c
-+++ b/vl.c
-@@ -185,6 +185,7 @@ bool boot_strict;
- uint8_t *boot_splash_filedata;
- int only_migratable; /* turn it off unless user states otherwise */
- bool wakeup_suspend_enabled;
-+int pio_telnet = 0;
+-- 
+2.34.1
+
+
+From 8219a1845c4dd7e0c7a22e3b1d32268b5a184f59 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Thu, 24 May 2018 23:07:15 +0200
+Subject: [PATCH 03/30] Minor tweaks
+
+---
+ chardev/char-io.c       | 3 +++
+ chardev/char-mux.c      | 2 ++
+ include/sysemu/sysemu.h | 2 +-
+ 3 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/chardev/char-io.c b/chardev/char-io.c
+index 8ced184160..b507c114a4 100644
+--- a/chardev/char-io.c
++++ b/chardev/char-io.c
+@@ -46,6 +46,9 @@ static gboolean io_watch_poll_prepare(GSource *source,
+     IOWatchPoll *iwp = io_watch_poll_from_source(source);
+     bool now_active = iwp->fd_can_read(iwp->opaque) > 0;
+     bool was_active = iwp->src != NULL;
++    
++    *timeout = 10;
++
+     if (was_active == now_active) {
+         return FALSE;
+     }
+diff --git a/chardev/char-mux.c b/chardev/char-mux.c
+index 200c62a0d0..0d546b79cc 100644
+--- a/chardev/char-mux.c
++++ b/chardev/char-mux.c
+@@ -197,6 +197,8 @@ static int mux_chr_can_read(void *opaque)
+ {
+     MuxChardev *d = MUX_CHARDEV(opaque);
+     int m = d->focus;
++    mux_chr_accept_input (opaque);
++
+     CharBackend *be = d->backends[m];
  
- int icount_align_option;
+     if ((d->prod[m] - d->cons[m]) < MUX_BUFFER_SIZE) {
+diff --git a/include/sysemu/sysemu.h b/include/sysemu/sysemu.h
+index 80c57fdc4e..e6b6b6f17d 100644
+--- a/include/sysemu/sysemu.h
++++ b/include/sysemu/sysemu.h
+@@ -85,7 +85,7 @@ int serial_max_hds(void);
  
-@@ -3719,6 +3720,9 @@ int main(int argc, char **argv, char **envp)
-                     }
-                     break;
+ /* parallel ports */
+ 
+-#define MAX_PARALLEL_PORTS 3
++#define MAX_PARALLEL_PORTS 7
+ 
+ extern Chardev *parallel_hds[MAX_PARALLEL_PORTS];
+ 
+-- 
+2.34.1
+
+
+From 7a534d42a3f4c309311ff37111928fb1c2cb7a48 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:10:03 +0200
+Subject: [PATCH 04/30] Make Boards Compile Again!
+
+... but not link
+---
+ hw/arm/portux920t.c | 58 ++++++++++++++++++++++++++++-----------------
+ hw/arm/portuxg20.c  | 40 +++++++++++++++++++------------
+ 2 files changed, 61 insertions(+), 37 deletions(-)
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index 21fd81f089..e3536cd364 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -12,6 +12,8 @@
+  *
+  */
+ 
++#include "qemu/osdep.h"
++#include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/devices.h"
+ #include "hw/arm/arm.h"
+@@ -19,7 +21,7 @@
+ #include "exec/address-spaces.h"
+ #include "net/net.h"
+ 
+-static ARMCPU *cpu;
++static ARMCPU *cpu; // XXX shouldn't be global probably
+ 
+ /*
+  * ++++++++++++++++++++++++++++++++++++
+@@ -29,7 +31,7 @@ static ARMCPU *cpu;
+  * Everything that triggers an operation on the memory
+  * regions of the 920T is declared here
+  */
+-static MemoryRegion *ram_alias;
++static MemoryRegion *ram_alias; // XX shouldn't be global probably
+ 
+ #define TYPE_PORTUX920MC "portux920mc"
+ #define PORTUX920MC(obj) OBJECT_CHECK(portux920mc_state, (obj), TYPE_PORTUX920MC)
+@@ -76,15 +78,16 @@ static void do_remap(bool ctrl)
+ static uint64_t portux920mc_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     portux920mc_state *s = PORTUX920MC(opaque);
+-    uint32_t asr;
++//    uint32_t asr;
+ 
+     switch (offset) {
+-    case 0x4: // Abort Status Register
+-        asr = cpu->env.asr;
+-        cpu->env.asr &= ~0x0f000000;
+-        return asr;
+-    case 0x8: // Abort Address Status Register
+-        return cpu->env.aasr;
++// XXX We don't have global cpu object and neither env with asr and aasr
++//    case 0x4: // Abort Status Register
++//        asr = cpu->env.asr;
++//        cpu->env.asr &= ~0x0f000000;
++//        return asr;
++//    case 0x8: // Abort Address Status Register
++//        return cpu->env.aasr;
+     case 0xC: // Master Priority Register
+         return s->mpr;
+     default:
+@@ -118,8 +121,8 @@ static void portux920mc_reset(DeviceState *dev) {
+     portux920mc_state *s = PORTUX920MC(dev);
+ 
+     s->mpr = 0x3210;
+-    cpu->env.asr = 0;
+-    cpu->env.aasr = 0;
++//    cpu->env.asr = 0; XXX
++//    cpu->env.aasr = 0;
+     do_remap(false);
+ }
+ 
+@@ -170,8 +173,8 @@ static struct arm_boot_info portux920t_binfo;
+ 
+ static void portux920t_init(MachineState *machine)
+ {
++    Object *cpuobj;
+     ram_addr_t ram_size = machine->ram_size;
+-    const char *cpu_model = machine->cpu_model;
+     const char *kernel_filename = machine->kernel_filename;
+     const char *kernel_cmdline = machine->kernel_cmdline;
+     const char *initrd_filename = machine->initrd_filename;
+@@ -185,16 +188,16 @@ static void portux920t_init(MachineState *machine)
+ 
+     /* Warning! This is in fact just a copy of the arm926 with a V4T chip set
+        instead of a V5! */
+-    cpu_model = "arm920";
+-    cpu = cpu_arm_init(cpu_model);
++    cpuobj = object_new(machine->cpu_type);
++    cpu = ARM_CPU(cpuobj);
+     if (!cpu) {
+         fprintf(stderr, "Unable to find CPU definition\n");
+         exit(1);
+     }
+ 
+     /* Initialize 1MB RAM and 64MB RAM */
+-    memory_region_init_ram(ram, NULL, "internal.ram", 0x100000);
+-    memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000); //Memory-Size is fixed at 64M
++    memory_region_init_ram(ram, NULL, "internal.ram", 0x100000, NULL);
++    memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000, NULL); //Memory-Size is fixed at 64M
+     //memory_region_init_ram(nand_flash, NULL, "LCD.ram", 0x40); //Cute 64Byte, no not K just B
+     vmstate_register_ram_global(ram);
+     vmstate_register_ram_global(ram2);
+@@ -282,20 +285,31 @@ static void portux920t_init(MachineState *machine)
+     arm_load_kernel(cpu, &portux920t_binfo);
+ }
+ 
+-static QEMUMachine portux920t_machine = {
+-    .name = "portux920t",
+-    .desc = "ARM Taskit Portux920t (ARM920)",
+-    .init = portux920t_init,
++static void portux920t_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++    
++    mc->desc = "ARM Taskit Portux920t (ARM920)";
++    mc->init = portux920t_init;
++    //mc->block_default_type = IF_SCSI; XXX
++    //mc->ignore_memory_transaction_failures = true;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
++}
++
++static const TypeInfo portux920t_type = {
++    .name = MACHINE_TYPE_NAME("portux920t"),
++    .parent = TYPE_MACHINE,
++    .class_init = portux920t_class_init,
+ };
+ 
+ 
+ /* Register the machine */
+ static void portux920t_machine_init(void)
+ {
+-    qemu_register_machine(&portux920t_machine);
++    type_register_static(&portux920t_type);
+ }
+ 
+-machine_init(portux920t_machine_init);
++type_init(portux920t_machine_init);
+ 
+ 
+ /* Initialize Memory Controller Class */
+diff --git a/hw/arm/portuxg20.c b/hw/arm/portuxg20.c
+index 4757c21bd0..75c80faa44 100644
+--- a/hw/arm/portuxg20.c
++++ b/hw/arm/portuxg20.c
+@@ -4,7 +4,8 @@
+  *
+  */
+ 
+-
++#include "qemu/osdep.h"
++#include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/arm/arm.h"
+ #include "hw/boards.h"
+@@ -19,8 +20,8 @@ static struct arm_boot_info portuxg20_binfo;
+ 
+ static void portuxg20_init(MachineState *machine)
+ {
++    Object *cpuobj;
+     ram_addr_t ram_size = machine->ram_size;
+-    const char *cpu_model = machine->cpu_model;
+     const char *kernel_filename = machine->kernel_filename;
+     const char *kernel_cmdline = machine->kernel_cmdline;
+     const char *initrd_filename = machine->initrd_filename;
+@@ -33,17 +34,18 @@ static void portuxg20_init(MachineState *machine)
+     qemu_irq aic_sys[32];
+     DeviceState *dev;
+ 
+-    cpu_model = "arm926";
+-    cpu = cpu_arm_init(cpu_model);
++    cpuobj = object_new(machine->cpu_type);
++
++    cpu = ARM_CPU(cpuobj);
+     if (!cpu) {
+         fprintf(stderr, "Unable to find CPU definition\n");
+         exit(1);
+     }
+ 
+     /* Initialize RAM */
+-    memory_region_init_ram(sram0, NULL, "Internal SRAM0", 0x4000); // 16kB sram0
+-    memory_region_init_ram(sram1, NULL, "Internal SRAM1", 0x4000); // 16kB sram1
+-    memory_region_init_ram(sdram, NULL, "SDRAM", 0x8000000);         // 128MB sdram
++    memory_region_init_ram(sram0, NULL, "Internal SRAM0", 0x4000, NULL); // 16kB sram0
++    memory_region_init_ram(sram1, NULL, "Internal SRAM1", 0x4000, NULL); // 16kB sram1
++    memory_region_init_ram(sdram, NULL, "SDRAM", 0x8000000, NULL);         // 128MB sdram
+     vmstate_register_ram_global(sram0);
+     vmstate_register_ram_global(sram1);
+     vmstate_register_ram_global(sdram);
+@@ -108,18 +110,26 @@ static void portuxg20_init(MachineState *machine)
+     arm_load_kernel(cpu, &portuxg20_binfo);
+ }
+ 
++static void portuxg20_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++    
++    mc->desc = "ARM Taskit PortuxG20 (ARM926EJ-S)";
++    mc->init = portuxg20_init;
++    //mc->block_default_type = IF_SCSI; XXX ?
++    //mc->ignore_memory_transaction_failures = true;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm920");
++}
+ 
+-static QEMUMachine portuxg20_machine = {
+-    .name = "portuxg20",
+-    .desc = "ARM Taskit PortuxG20 (ARM926EJ-S)",
+-    .init = portuxg20_init,
++static const TypeInfo portuxg20_type = {
++    .name = MACHINE_TYPE_NAME("portuxg20"),
++    .parent = TYPE_MACHINE,
++    .class_init = portuxg20_class_init,
+ };
+ 
+-
+-
+ static void portuxg20_machine_init(void)
+ {
+-    qemu_register_machine(&portuxg20_machine);
++    type_register_static(&portuxg20_type);
+ }
+ 
+-machine_init(portuxg20_machine_init);
++type_init(portuxg20_machine_init);
+-- 
+2.34.1
+
+
+From 013925839d628ea1614b1f5ef885a3c6789a1232 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:19:05 +0200
+Subject: [PATCH 05/30] MBLA
+
+---
+ hw/net/at91emac.c    | 3 ++-
+ hw/net/at91g20emac.c | 4 +++-
+ 2 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/hw/net/at91emac.c b/hw/net/at91emac.c
+index 2e9c355509..bd2b387332 100644
+--- a/hw/net/at91emac.c
++++ b/hw/net/at91emac.c
+@@ -35,6 +35,7 @@
+  * sending, ...
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ #include "net/net.h"
+ #include "hw/devices.h"
+@@ -647,7 +648,7 @@ static void at91emac_cleanup(NetClientState *nc)
+ }
+ 
+ static NetClientInfo net_at91emac_info = {
+-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
++    .type = NET_CLIENT_DRIVER_NIC,
+     .size = sizeof(NICState),
+     .can_receive = at91emac_can_receive,
+     .receive = at91emac_receive,
+diff --git a/hw/net/at91g20emac.c b/hw/net/at91g20emac.c
+index 8c3c802760..0c24cf0842 100644
+--- a/hw/net/at91g20emac.c
++++ b/hw/net/at91g20emac.c
+@@ -27,6 +27,7 @@
+  * WARNING!
+  * This is written for the AT91RM9200 which has a different behavior than all
+  * the other (or most, we don't know) AT91-boards. So have a look in your documentation.
++ * XXX wrong...
+  */
+ 
+ /*
+@@ -35,6 +36,7 @@
+  * sending, ...
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ #include "net/net.h"
+ #include "hw/devices.h"
+@@ -646,7 +648,7 @@ static void at91g20emac_cleanup(NetClientState *nc)
+ }
+ 
+ static NetClientInfo net_at91g20emac_info = {
+-    .type = NET_CLIENT_OPTIONS_KIND_NIC,
++    .type = NET_CLIENT_DRIVER_NIC,
+     .size = sizeof(NICState),
+     .can_receive = at91g20emac_can_receive,
+     .receive = at91g20emac_receive,
+-- 
+2.34.1
+
+
+From e2d09c9c4726cbc24bb130de19406fcf77373c33 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:30:44 +0200
+Subject: [PATCH 06/30] GPIO
+
+---
+ hw/gpio/at91pio.c | 24 ++++++++++++++----------
+ 1 file changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+index 545764def3..e725965d99 100644
+--- a/hw/gpio/at91pio.c
++++ b/hw/gpio/at91pio.c
+@@ -1,8 +1,10 @@
+ /**
+  * Portux920T PIO a,b and c
+  */
++
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+-#include "sysemu/char.h"
++#include "chardev/char-fe.h"
+ 
+ #define TYPE_AT91PIO "at91pio"
+ #define AT91PIO(obj) OBJECT_CHECK(at91pio_state, (obj), TYPE_AT91PIO)
+@@ -31,7 +33,7 @@ typedef struct {
+ } at91pio_state;
+ 
+ //KBS-Special-Telnet-Client
+-CharDriverState *char_kbs;
++Chardev *char_kbs;
+ extern int pio_telnet;
+ 
+ static uint64_t at91pio_read(void *opaque, hwaddr offset, unsigned size)
+@@ -246,7 +248,7 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
+             //TODO: Nur wenn wirklich etwas neugezeichnet werden soll
+             if(pio_telnet){
+                 // Clear Telnet Display
+-                qemu_chr_fe_printf(char_kbs,"\033[2J\033[1;1H");
++                qemu_chr_fe_printf(char_kbs->be,"\033[2J\033[1;1H");
+ 
+                 /**
+                  * LED CONTROL
+@@ -265,22 +267,22 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
+                 if((pioc_ctrl&1)!=1){
+                     strcpy(red_led, "\033[1;40m\033[1;31m_\033[0m");
                  }
-+            case QEMU_OPTION_piotelnet:
-+		pio_telnet = 1;
-+		break;
-             case QEMU_OPTION_qtest:
-                 qtest_chrdev = optarg;
+-                qemu_chr_fe_printf(char_kbs,"\r\nLED: %s%s%s",yellow_led, green_led, red_led);
++                qemu_chr_fe_printf(char_kbs->be,"\r\nLED: %s%s%s",yellow_led, green_led, red_led);
+ 
+                 /**
+                  * DISPLAY
+                  */
+ 
+-                qemu_chr_fe_printf(char_kbs,"\r\n*** DISPLAY ****\r\n");
++                qemu_chr_fe_printf(char_kbs->be,"\r\n*** DISPLAY ****\r\n");
+                 int row_starts[]={0,64,16,80};
+                 for(i=0;i<4;i++){
+                     /*for(j=0;j<16;j++){
+-                        qemu_chr_fe_printf(char_kbs,"%c",s->display[j+row_starts[i]]);
++                        qemu_chr_fe_printf(char_kbs->be,"%c",s->display[j+row_starts[i]]);
+                     }*/
+-                    qemu_chr_fe_write(char_kbs,&(s->display[row_starts[i]]),16);
+-                    qemu_chr_fe_printf(char_kbs,"\r\n");
++                    qemu_chr_fe_write(char_kbs->be,&(s->display[row_starts[i]]),16);
++                    qemu_chr_fe_printf(char_kbs->be,"\r\n");
+                 }
+-                qemu_chr_fe_printf(char_kbs,"*END OF DISPLAY*\r\n");
++                qemu_chr_fe_printf(char_kbs->be,"*END OF DISPLAY*\r\n");
+             }
+ }
+ 
+@@ -291,6 +293,7 @@ static const MemoryRegionOps at91pio_ops = {
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
++#ifdef LRK_UNUSED
+ static const VMStateDescription vmstate_pio = {
+     .name = "at91pio",
+     .version_id = 1,
+@@ -311,6 +314,7 @@ static const VMStateDescription vmstate_pio = {
+         VMSTATE_END_OF_LIST()
+     }
+ };
++#endif
+ 
+ static int at91pio_init(SysBusDevice *dev)
+ {
+@@ -325,7 +329,7 @@ static int at91pio_init(SysBusDevice *dev)
+     s->display_pos=0;
+     //Telnet-Client for LCD and LED Output. Port 44444
+     if(pio_telnet!=0){
+-    char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server", NULL);
++    char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server");
+     }
+     return 0;
+ }
+-- 
+2.34.1
+
+
+From 8fa8f9c444a55d485977586bb761ff5fb59d04bf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:32:02 +0200
+Subject: [PATCH 07/30] Display
+
+---
+ hw/display/at91display.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/hw/display/at91display.c b/hw/display/at91display.c
+index 57ed207531..8d6000ba44 100644
+--- a/hw/display/at91display.c
++++ b/hw/display/at91display.c
+@@ -1,6 +1,8 @@
+ /**
+  * Portux920T display a,b and c
+  */
++
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ 
+ #define TYPE_AT91DISPLAY "at91display"
+@@ -43,6 +45,7 @@ static const MemoryRegionOps display_ops = {
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
++#ifdef LRK_UNUSED
+ static const VMStateDescription vmstate_display = {
+     .name = "at91display",
+     .version_id = 1,
+@@ -53,6 +56,7 @@ static const VMStateDescription vmstate_display = {
+         VMSTATE_END_OF_LIST()
+     }
+ };
++#endif
+ 
+ static int display_init(SysBusDevice *dev)
+ {
+-- 
+2.34.1
+
+
+From 03c51c390f2844c429a0e8b33f90576ec84b4c13 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:43:15 +0200
+Subject: [PATCH 08/30] Timers
+
+---
+ hw/timer/at91g20st.c | 13 ++++++++-----
+ hw/timer/at91st.c    | 11 ++++++-----
+ 2 files changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/hw/timer/at91g20st.c b/hw/timer/at91g20st.c
+index 56388362ba..33df572f60 100644
+--- a/hw/timer/at91g20st.c
++++ b/hw/timer/at91g20st.c
+@@ -3,8 +3,10 @@
+  * All timers!
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ #include "qemu/timer.h"
++#include "qemu/cutils.h"
+ 
+ #define TYPE_AT91G20ST "at91g20st"
+ #define AT91G20ST(obj) OBJECT_CHECK(at91g20st_state, (obj), TYPE_AT91G20ST)
+@@ -153,8 +155,8 @@ static void wd_set_alarm(at91g20st_state *s)
+ 
+         now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+ 
+-        ticks = (((s->wdt_mr &0xFFF))/32768) + now / get_ticks_per_sec();
+-        timer_mod(s->wd_timer, now + ticks*get_ticks_per_sec()/1000);
++        ticks = (((s->wdt_mr &0xFFF))/32768) + now / NANOSECONDS_PER_SECOND;
++        timer_mod(s->wd_timer, now + ticks*NANOSECONDS_PER_SECOND/1000);
+ }
+ 
+ static void wd_interrupt(void * opaque)
+@@ -246,9 +248,10 @@ static void at91g20st_write(void * opaque, hwaddr offset,
+         s->rtt_vr+=(tmp -  s->time_last_change)/(hz*1000000);
+         s->time_last_change=tmp;
+         s->rtt_mr = value;
+-        if(value & (1<<18)) //Reset and (maybe) restart clock
++        if(value & (1<<18)) { //Reset and (maybe) restart clock
+             s->startup_real_time = tmp;
+-            s->rtt_vr=0;
++            s->rtt_vr=0; // XXX this wasn't guarded by if, now is -- correct?
++        }
+         if(value & (1<<17))
+             realtime_increment_set_alarm(s);
+         if(value & (1<<16))
+@@ -336,7 +339,7 @@ static void at91g20st_class_init(ObjectClass *klass, void *data)
+     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+     k->init = at91g20st_init;
+-    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
++    dc->user_creatable = false; /* FIXME explain why */
+     dc->vmsd = &vmstate_at91g20st;
+ }
+ 
+diff --git a/hw/timer/at91st.c b/hw/timer/at91st.c
+index 5c231df10c..7cf3481311 100644
+--- a/hw/timer/at91st.c
++++ b/hw/timer/at91st.c
+@@ -2,6 +2,7 @@
+  * Atmel AT91RM9200 System Timer (ST)
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ #include "qemu/timer.h"
+ #include "sysemu/sysemu.h"
+@@ -98,7 +99,7 @@ static void st_set_alarm(at91st_state *s)
+     }
+ 
+     /* piv == 0x10000 => 2 second interval */
+-    t += get_ticks_per_sec() * piv * 2 / 0x10000;
++    t += NANOSECONDS_PER_SECOND * piv * 2 / 0x10000;
+ 
+     timer_mod(s->st_timer, t);
+ }
+@@ -121,7 +122,7 @@ static void wd_set_alarm(at91st_state *s)
+         wdv = 0x10000;
+ 
+     /* wdv == 0x10000 => 256 second interval */
+-    t += get_ticks_per_sec() * wdv * 256 / 0x10000;
++    t += NANOSECONDS_PER_SECOND * wdv * 256 / 0x10000;
+ 
+     timer_mod(s->wd_timer, t);
+ }
+@@ -131,7 +132,7 @@ static void wd_interrupt(void *opaque)
+     at91st_state *s = opaque;
+     s->sr |= WDOVF;
+     if (s->wdmr & RSTEN) {
+-        qemu_system_reset_request();
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+     }
+     wd_set_alarm(s);
+     at91st_update(s);
+@@ -147,7 +148,7 @@ static void rt_set_alarm(at91st_state *s)
+         rtpres = 0x10000;
+ 
+     /* rtpres == 0x10000 => 2 second interval */
+-    t += get_ticks_per_sec() * rtpres * 2 / 0x10000;
++    t += NANOSECONDS_PER_SECOND * rtpres * 2 / 0x10000;
+ 
+     timer_mod(s->rt_timer, t);
+ }
+@@ -282,7 +283,7 @@ static void at91st_class_init(ObjectClass *klass, void *data)
+     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+     k->init = at91st_init;
+-    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
++    dc->user_creatable = false; /* FIXME explain why */
+     dc->reset = at91st_reset;
+     dc->vmsd = &vmstate_at91st;
+ }
+-- 
+2.34.1
+
+
+From 04ba46f02f5cc2538bdcfa4e41fcaf2374e20a17 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 18:45:08 +0200
+Subject: [PATCH 09/30] AIC
+
+---
+ hw/intc/at91_intor.c | 3 ++-
+ hw/intc/at91aic.c    | 3 ++-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/hw/intc/at91_intor.c b/hw/intc/at91_intor.c
+index 3598ef1360..abea6fc4a4 100644
+--- a/hw/intc/at91_intor.c
++++ b/hw/intc/at91_intor.c
+@@ -22,6 +22,7 @@
+  * THE SOFTWARE.
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+ 
+ #define TYPE_AT91_INTOR "at91_intor"
+@@ -79,7 +80,7 @@ static void at91_intor_class_init(ObjectClass *klass, void *data)
+     DeviceClass *dc = DEVICE_CLASS(klass);
+     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+     k->init = at91_intor_init;
+-    dc->cannot_instantiate_with_device_add_yet = true; /* FIXME explain why */
++    dc->user_creatable = false; /* FIXME explain why */
+     dc->reset = at91_intor_reset;
+     dc->vmsd = &vmstate_at91_intor;
+ }
+diff --git a/hw/intc/at91aic.c b/hw/intc/at91aic.c
+index 0a05dde08a..0c1734edc5 100644
+--- a/hw/intc/at91aic.c
++++ b/hw/intc/at91aic.c
+@@ -11,6 +11,7 @@
+  * This code is licenced under the GPL.
+  */
+ 
++#include "qemu/osdep.h"
+ #include <stdio.h>
+ #include <stddef.h>
+ 
+@@ -361,7 +362,7 @@ static void at91aic_class_init(ObjectClass *klass, void *data)
+     DeviceClass *dc = DEVICE_CLASS(klass);
+     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+     k->init = at91aic_init;
+-    dc->cannot_instantiate_with_device_add_yet = true;
++    dc->user_creatable = false;
+     dc->reset = at91aic_reset;
+     dc->vmsd = &vmstate_at91aic;
+ }
+-- 
+2.34.1
+
+
+From 06f16235534600486a0833114ca9c5da0b2f42cd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Tue, 28 Aug 2018 19:22:19 +0200
+Subject: [PATCH 10/30] char
+
+---
+ hw/arm/portux920t.c    | 11 +++++----
+ hw/char/at91dbgu.c     | 26 ++++++++++++---------
+ hw/char/at91usart.c    | 40 +++++++++++++++++---------------
+ include/hw/char/at91.h | 52 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 94 insertions(+), 35 deletions(-)
+ create mode 100644 include/hw/char/at91.h
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index e3536cd364..8dee019ad2 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -20,6 +20,7 @@
+ #include "hw/boards.h"
+ #include "exec/address-spaces.h"
+ #include "net/net.h"
++#include "hw/char/at91.h"
+ 
+ static ARMCPU *cpu; // XXX shouldn't be global probably
+ 
+@@ -259,13 +260,13 @@ static void portux920t_init(MachineState *machine)
+      * Periphery
+      * +++++++++
+      */
+-    sysbus_create_simple("at91dbgu", 0xFFFFF200, aic_sys[0]);
++    at91dbgu_create(0xFFFFF200, aic_sys[0], NULL);
+     sysbus_create_simple("at91pio", 0xFFFFF400, NULL);
+     sysbus_create_simple("at91st", 0xFFFFFD00, aic_sys[1]);
+-    sysbus_create_simple("at91usart", 0xFFFC0000, NULL);
+-    sysbus_create_simple("at91usart", 0xFFFC4000, NULL);
+-    sysbus_create_simple("at91usart", 0xFFFC8000, NULL);
+-    sysbus_create_simple("at91usart", 0xFFFCC000, NULL);
++    at91usart_create(0xFFFC0000, NULL, NULL);
++    at91usart_create(0xFFFC4000, NULL, NULL);
++    at91usart_create(0xFFFC8000, NULL, NULL);
++    at91usart_create(0xFFFCC000, NULL, NULL);
+ 
+     sysbus_create_simple("at91display", 0x40000000, NULL);
+ 
+diff --git a/hw/char/at91dbgu.c b/hw/char/at91dbgu.c
+index 500db3e9e1..b2b184a68b 100644
+--- a/hw/char/at91dbgu.c
++++ b/hw/char/at91dbgu.c
+@@ -5,9 +5,9 @@
+  * Every baud rate work; no parity checks.
+  */
+ 
+-
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+-#include "sysemu/char.h"
++#include "chardev/char-fe.h"
+ 
+ #define TYPE_AT91DBGU "at91dbgu"
+ #define AT91DBGU(obj) OBJECT_CHECK(at91dbgu_state, (obj), TYPE_AT91DBGU)
+@@ -16,7 +16,7 @@ typedef struct {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     qemu_irq irq;
+-    CharDriverState *chr;
++    CharBackend chr;
+ 
+     // DBGU Register
+     uint32_t cr;
+@@ -39,6 +39,7 @@ typedef struct {
+ 
+ } at91dbgu_state;
+ 
++#ifdef LRK_UNUSED
+ static const VMStateDescription vmstate_at91dbgu = {
+     .name = "at91dbgu",
+     .version_id = 1,
+@@ -63,6 +64,7 @@ static const VMStateDescription vmstate_at91dbgu = {
+         VMSTATE_END_OF_LIST()
+     }
+ };
++#endif
+ 
+ #define DBGU_CR     0x00
+ #define DBGU_MR     0x04
+@@ -131,9 +133,7 @@ static void at91dbgu_send(void *opaque, const uint8_t *buf, int size)
+ {
+     at91dbgu_state *s = opaque;
+ 
+-    if (s->chr) {
+-        qemu_chr_fe_write(s->chr, buf, size);
+-    }
++    qemu_chr_fe_write(&s->chr, buf, size);
+ }
+ 
+ static void at91dbgu_update(at91dbgu_state *s)
+@@ -375,8 +375,6 @@ static int at91dbgu_init(SysBusDevice *dev)
+     sysbus_init_mmio(dev, &s->iomem);
+     sysbus_init_irq(dev, &s->irq);
+ 
+-    s->chr = qemu_char_get_next_serial();
+-
+     // DBGU
+     s->cr = TXEN | RXEN; /* Should be zero */
+     s->mr = 0x0;
+@@ -396,17 +394,23 @@ static int at91dbgu_init(SysBusDevice *dev)
+     s->periph_tncr = 0x0;
+     s->periph_ptsr = 0x0;
+ 
+-    if (s->chr) {
+-        qemu_chr_add_handlers(s->chr, at91dbgu_can_receive, at91dbgu_receive, at91dbgu_event, s);
+-    }
++    qemu_chr_fe_set_handlers(&s->chr, at91dbgu_can_receive, at91dbgu_receive,
++            at91dbgu_event, NULL, s, NULL, true);
+ 
+     return 0;
+ }
+ 
++static Property at91dbug_properties[] = {
++    DEFINE_PROP_CHR("chardev", at91dbgu_state, chr),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void at91dbgu_class_init(ObjectClass *klass, void *data)
+ {
+     SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
++    DeviceClass *dc = DEVICE_CLASS(klass);
+     sdc->init = at91dbgu_init;
++    dc->props = at91dbug_properties;
+ }
+ 
+ static const TypeInfo at91dbgu_info = {
+diff --git a/hw/char/at91usart.c b/hw/char/at91usart.c
+index 75d4b29862..52eef3210e 100644
+--- a/hw/char/at91usart.c
++++ b/hw/char/at91usart.c
+@@ -2,8 +2,10 @@
+  * Portux920t USART
+  */
+ 
++#include "qemu/osdep.h"
+ #include "hw/sysbus.h"
+-#include "sysemu/char.h"
++#include "chardev/char.h"
++#include "chardev/char-fe.h"
+ 
+ /* Control Register */
+ #define CR_RXEN (1<<4)
+@@ -33,7 +35,7 @@ typedef struct {
+     uint32_t imr;
+     uint32_t csr;
+     uint32_t rhr;
+-    CharDriverState *chr;
++    CharBackend chr;
+     qemu_irq irq;
+     const unsigned char *id;
+     //DMA Register
+@@ -150,13 +152,11 @@ static void at91usart_write(void *opaque, hwaddr offset,
+         break;
+     case 0x1C: /* US_THR */
+         ch = value;
+-        if(s->chr){
+-            if(s->cr & CR_TXEN){
+-                s->csr&=~CSR_TXRDY; //upon writing a char into the thr register set transmitter ready bit in the csr to 0
+-                qemu_chr_fe_write(s->chr, &ch, 1);
+-                if(!(s->cr&CR_TXDIS))s->csr|=CSR_TXRDY;// set transmitter ready bit in the csr wieder to 1
+-                at91usart_update(s,1);
+-            }
++        if(s->cr & CR_TXEN){
++            s->csr&=~CSR_TXRDY; //upon writing a char into the thr register set transmitter ready bit in the csr to 0
++            qemu_chr_fe_write(&s->chr, &ch, 1);
++            if(!(s->cr&CR_TXDIS))s->csr|=CSR_TXRDY;// set transmitter ready bit in the csr wieder to 1
++            at91usart_update(s,1);
+         }
+         break;
+     case 0x20: /* US_BRGR (not implemented) */
+@@ -214,11 +214,9 @@ static void at91usart_write(void *opaque, hwaddr offset,
+                 s->periph_ptsr|=(1<<8);
+                 void * buf = malloc(sizeof(uint8_t)*1024);
+                 cpu_physical_memory_read(s->periph_tpr,buf,s->periph_tcr);
+-                if(s->chr){
+-                    //qemu_chr_fe_open(s->chr);
+-                    qemu_chr_fe_write(s->chr,buf,s->periph_tcr);
+-                    //qemu_chr_fe_close(s->chr);
+-                }
++                //qemu_chr_fe_open(&s->chr);
++                qemu_chr_fe_write(&s->chr,buf,s->periph_tcr);
++                //qemu_chr_fe_close(&s->chr);
+             }
+         }
+ 
+@@ -296,22 +294,26 @@ static int at91usart_init(SysBusDevice *sbd)
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91usart_ops, s, "at91usart", 0x1000);
+     sysbus_init_mmio(sbd, &s->iomem);
+     sysbus_init_irq(sbd, &s->irq);
+-    s->chr = qemu_char_get_next_serial();
+     s->cr = 0x0;
+     s->csr = (1<<4); //Always set the End of Transfer signal to active
+-    if (s->chr) {
+-        qemu_chr_add_handlers(s->chr, at91usart_can_receive, at91usart_receive,
+-                              at91usart_event, s);
+-    }
++    qemu_chr_fe_set_handlers(&s->chr, at91usart_can_receive, at91usart_receive,
++                              at91usart_event, NULL, s, NULL, true);
+     vmstate_register(dev, -1, &vmstate_at91usart, s);
+     return 0;
+ }
+ 
++static Property at91usart_properties[] = {
++    DEFINE_PROP_CHR("chardev", at91usart_state, chr),
++    DEFINE_PROP_END_OF_LIST(),
++};
++
+ static void at91usart_arm_class_init(ObjectClass *klass, void *data)
+ {
+     SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
++    DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     sdc->init = at91usart_init;
++    dc->props = at91usart_properties;
+ }
+ 
+ static const TypeInfo at91usart_info = {
+diff --git a/include/hw/char/at91.h b/include/hw/char/at91.h
+new file mode 100644
+index 0000000000..5913d2c22d
+--- /dev/null
++++ b/include/hw/char/at91.h
+@@ -0,0 +1,52 @@
++/*
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2 or later, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef HW_AT91_H
++#define HW_AT91_H
++
++static inline DeviceState *at91dbgu_create(hwaddr addr,
++                                        qemu_irq irq,
++                                        Chardev *chr)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    dev = qdev_create(NULL, "at91dbgu");
++    s = SYS_BUS_DEVICE(dev);
++    qdev_prop_set_chr(dev, "chardev", chr);
++    qdev_init_nofail(dev);
++    sysbus_mmio_map(s, 0, addr);
++    sysbus_connect_irq(s, 0, irq);
++
++    return dev;
++}
++
++static inline DeviceState *at91usart_create(hwaddr addr,
++                                                 qemu_irq irq,
++                                                 Chardev *chr)
++{
++    DeviceState *dev;
++    SysBusDevice *s;
++
++    dev = qdev_create(NULL, "at91usart");
++    s = SYS_BUS_DEVICE(dev);
++    qdev_prop_set_chr(dev, "chardev", chr);
++    qdev_init_nofail(dev);
++    sysbus_mmio_map(s, 0, addr);
++    sysbus_connect_irq(s, 0, irq);
++
++    return dev;
++}
++
++#endif
+-- 
+2.34.1
+
+
+From 0b4fdb431eefe0d86856ba9b62e56c736142a415 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sat, 29 Sep 2018 15:39:01 +0200
+Subject: [PATCH 11/30] GTK fix
+
+---
+ dtc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dtc b/dtc
+index 88f18909db..e54388015a 160000
+--- a/dtc
++++ b/dtc
+@@ -1 +1 @@
+-Subproject commit 88f18909db731a627456f26d779445f84e449536
++Subproject commit e54388015af1fb4bf04d0bca99caba1074d9cc42
+-- 
+2.34.1
+
+
+From 01504937d3a03d0378b8967b848b9c606179df57 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sat, 29 Sep 2018 18:49:13 +0200
+Subject: [PATCH 12/30] Misc
+
+ - Move io_execx below io_readex, also guard by SOFTMMU_CODE_ACCESS
+ - Register cpu as realized after creation, otherwise device paths would
+   be NULL
+ - Don't vmstate_register, this should've been taken care of by the init
+   functions
+ - AIC: Restructure, QOM-ify more
+ - restore needs a new param now
+---
+ hw/arm/portux920t.c |  7 +++++--
+ hw/intc/at91aic.c   | 16 +++++++++-------
+ target/arm/helper.c |  8 ++++++++
+ 3 files changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index 8dee019ad2..4d147eb3f7 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -13,6 +13,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qapi/error.h"
+ #include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/devices.h"
+@@ -190,6 +191,8 @@ static void portux920t_init(MachineState *machine)
+     /* Warning! This is in fact just a copy of the arm926 with a V4T chip set
+        instead of a V5! */
+     cpuobj = object_new(machine->cpu_type);
++    object_property_set_bool(cpuobj, true, "realized", &error_fatal);
++    
+     cpu = ARM_CPU(cpuobj);
+     if (!cpu) {
+         fprintf(stderr, "Unable to find CPU definition\n");
+@@ -200,8 +203,8 @@ static void portux920t_init(MachineState *machine)
+     memory_region_init_ram(ram, NULL, "internal.ram", 0x100000, NULL);
+     memory_region_init_ram(ram2, NULL, "64MB.ram", 0x4000000, NULL); //Memory-Size is fixed at 64M
+     //memory_region_init_ram(nand_flash, NULL, "LCD.ram", 0x40); //Cute 64Byte, no not K just B
+-    vmstate_register_ram_global(ram);
+-    vmstate_register_ram_global(ram2);
++    //vmstate_register_ram_global(ram);
++    //vmstate_register_ram_global(ram2);
+     /* 1MB ram at address zero.  */
+     memory_region_add_subregion(sysmem, 0x200000, ram);
+     memory_region_set_enabled(ram, true);
+diff --git a/hw/intc/at91aic.c b/hw/intc/at91aic.c
+index 0c1734edc5..e70ca6a796 100644
+--- a/hw/intc/at91aic.c
++++ b/hw/intc/at91aic.c
+@@ -23,6 +23,7 @@
+ 
+ typedef struct {
+     SysBusDevice parent_obj;
++    
+     MemoryRegion iomem;
+     qemu_irq irq;
+     qemu_irq fiq;
+@@ -343,25 +344,25 @@ static void at91aic_set_irq(void *opaque, int irq, int level) {
+     at91aic_update(s);
+ }
+ 
+-static int at91aic_init(SysBusDevice *sbd)
++static void at91aic_init(Object *obj)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+-    at91aic_state *s = AT91AIC(dev);
+-    memory_region_init_io(&s->iomem, OBJECT(s), &at91aic_ops, s, "at91aic", 0x1FF);
++    DeviceState *dev = DEVICE(obj);
++    at91aic_state *s = AT91AIC(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    
++    memory_region_init_io(&s->iomem, obj, &at91aic_ops, s, "at91aic", 0x1FF);
+     sysbus_init_mmio(sbd, &s->iomem);
+     qdev_init_gpio_in(dev, at91aic_set_irq, 32);
+     sysbus_init_irq(sbd, &s->irq);
+     sysbus_init_irq(sbd, &s->fiq);
+ 
+     at91aic_reset(dev);
+-    return 0;
+ }
+ 
+ static void at91aic_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+-    k->init = at91aic_init;
++    
+     dc->user_creatable = false;
+     dc->reset = at91aic_reset;
+     dc->vmsd = &vmstate_at91aic;
+@@ -371,6 +372,7 @@ static const TypeInfo at91aic_info = {
+     .name = TYPE_AT91AIC,
+     .parent = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91aic_state),
++    .instance_init = at91aic_init,
+     .class_init = at91aic_class_init,
+ };
+ 
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index 9893fb19b4..8b723ef590 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -9605,6 +9605,14 @@ static bool get_phys_addr_lpae(CPUARMState *env, target_ulong address,
+             goto do_fault;
+         }
+     }
++<<<<<<< HEAD
++=======
++    
++    cpu_restore_state(cs, GETPC(), true /* XXX should TB be interrupted? */);
++    cpu_loop_exit(cs);
++}
++#endif
++>>>>>>> Misc
+ 
+     if (param.using64k) {
+         stride = 13;
+-- 
+2.34.1
+
+
+From 04f4d07a2392d0d003931549a5317bbdaf48eda8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sat, 29 Sep 2018 20:04:48 +0200
+Subject: [PATCH 13/30] more QOM-ification, reenable temp hacks
+
+---
+ hw/arm/portux920t.c  | 18 +++++++++---------
+ hw/char/at91dbgu.c   | 29 +++++++++++++++++------------
+ hw/char/at91usart.c  | 23 ++++++++++++++---------
+ hw/gpio/at91pio.c    | 31 ++++++++++++++++---------------
+ hw/intc/at91_intor.c | 12 ++++++------
+ hw/timer/at91st.c    | 18 +++++++++---------
+ 6 files changed, 71 insertions(+), 60 deletions(-)
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index 4d147eb3f7..b934b4c346 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -80,16 +80,16 @@ static void do_remap(bool ctrl)
+ static uint64_t portux920mc_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     portux920mc_state *s = PORTUX920MC(opaque);
+-//    uint32_t asr;
++    uint32_t asr;
+ 
+     switch (offset) {
+ // XXX We don't have global cpu object and neither env with asr and aasr
+-//    case 0x4: // Abort Status Register
+-//        asr = cpu->env.asr;
+-//        cpu->env.asr &= ~0x0f000000;
+-//        return asr;
+-//    case 0x8: // Abort Address Status Register
+-//        return cpu->env.aasr;
++    case 0x4: // Abort Status Register
++        asr = cpu->env.asr;
++        cpu->env.asr &= ~0x0f000000;
++        return asr;
++    case 0x8: // Abort Address Status Register
++        return cpu->env.aasr;
+     case 0xC: // Master Priority Register
+         return s->mpr;
+     default:
+@@ -123,8 +123,8 @@ static void portux920mc_reset(DeviceState *dev) {
+     portux920mc_state *s = PORTUX920MC(dev);
+ 
+     s->mpr = 0x3210;
+-//    cpu->env.asr = 0; XXX
+-//    cpu->env.aasr = 0;
++    cpu->env.asr = 0; // XXX
++    cpu->env.aasr = 0;
+     do_remap(false);
+ }
+ 
+diff --git a/hw/char/at91dbgu.c b/hw/char/at91dbgu.c
+index b2b184a68b..a3336e7831 100644
+--- a/hw/char/at91dbgu.c
++++ b/hw/char/at91dbgu.c
+@@ -39,7 +39,6 @@ typedef struct {
+ 
+ } at91dbgu_state;
+ 
+-#ifdef LRK_UNUSED
+ static const VMStateDescription vmstate_at91dbgu = {
+     .name = "at91dbgu",
+     .version_id = 1,
+@@ -64,7 +63,6 @@ static const VMStateDescription vmstate_at91dbgu = {
+         VMSTATE_END_OF_LIST()
+     }
+ };
+-#endif
+ 
+ #define DBGU_CR     0x00
+ #define DBGU_MR     0x04
+@@ -368,12 +366,14 @@ static const MemoryRegionOps at91dbgu_ops = {
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+-static int at91dbgu_init(SysBusDevice *dev)
++static void at91dbgu_init(Object *obj)
+ {
+-    at91dbgu_state *s = AT91DBGU(dev);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    at91dbgu_state *s = AT91DBGU(obj);
++    
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91dbgu_ops, s, "at91dbgu", 0x200);
+-    sysbus_init_mmio(dev, &s->iomem);
+-    sysbus_init_irq(dev, &s->irq);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
+ 
+     // DBGU
+     s->cr = TXEN | RXEN; /* Should be zero */
+@@ -393,30 +393,35 @@ static int at91dbgu_init(SysBusDevice *dev)
+     s->periph_tnpr = 0x0;
+     s->periph_tncr = 0x0;
+     s->periph_ptsr = 0x0;
++}
+ 
++static void at91dbgu_realize(DeviceState *dev, Error **errp)
++{
++    at91dbgu_state *s = AT91DBGU(dev);
++    
+     qemu_chr_fe_set_handlers(&s->chr, at91dbgu_can_receive, at91dbgu_receive,
+             at91dbgu_event, NULL, s, NULL, true);
+-
+-    return 0;
+ }
+ 
+-static Property at91dbug_properties[] = {
++static Property at91dbgu_properties[] = {
+     DEFINE_PROP_CHR("chardev", at91dbgu_state, chr),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+ static void at91dbgu_class_init(ObjectClass *klass, void *data)
+ {
+-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    sdc->init = at91dbgu_init;
+-    dc->props = at91dbug_properties;
++    
++    dc->realize = at91dbgu_realize;
++    dc->vmsd = &vmstate_at91dbgu;
++    dc->props = at91dbgu_properties;
+ }
+ 
+ static const TypeInfo at91dbgu_info = {
+     .name          = TYPE_AT91DBGU,
+     .parent        = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91dbgu_state),
++    .instance_init = at91dbgu_init,
+     .class_init    = at91dbgu_class_init,
+ };
+ 
+diff --git a/hw/char/at91usart.c b/hw/char/at91usart.c
+index 52eef3210e..1816e0d229 100644
+--- a/hw/char/at91usart.c
++++ b/hw/char/at91usart.c
+@@ -286,20 +286,24 @@ static const VMStateDescription vmstate_at91usart = {
+     }
+ };
+ 
+-static int at91usart_init(SysBusDevice *sbd)
++static void at91usart_init(Object *obj)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+-    at91usart_state *s = AT91USART(dev);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    at91usart_state *s = AT91USART(obj);
+ 
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91usart_ops, s, "at91usart", 0x1000);
+     sysbus_init_mmio(sbd, &s->iomem);
+     sysbus_init_irq(sbd, &s->irq);
+     s->cr = 0x0;
+     s->csr = (1<<4); //Always set the End of Transfer signal to active
++}
++
++static void at91usart_realize(DeviceState *dev, Error **errp)
++{
++    at91usart_state *s = AT91USART(dev);
++    
+     qemu_chr_fe_set_handlers(&s->chr, at91usart_can_receive, at91usart_receive,
+                               at91usart_event, NULL, s, NULL, true);
+-    vmstate_register(dev, -1, &vmstate_at91usart, s);
+-    return 0;
+ }
+ 
+ static Property at91usart_properties[] = {
+@@ -307,12 +311,12 @@ static Property at91usart_properties[] = {
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
+-static void at91usart_arm_class_init(ObjectClass *klass, void *data)
++static void at91usart_class_init(ObjectClass *klass, void *data)
+ {
+-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+-    sdc->init = at91usart_init;
++    dc->realize = at91usart_realize;
++    dc->vmsd = &vmstate_at91usart;
+     dc->props = at91usart_properties;
+ }
+ 
+@@ -320,7 +324,8 @@ static const TypeInfo at91usart_info = {
+     .name          = TYPE_AT91USART,
+     .parent        = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91usart_state),
+-    .class_init    = at91usart_arm_class_init,
++    .instance_init = at91usart_init,
++    .class_init    = at91usart_class_init,
+ };
+ 
+ 
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+index e725965d99..58d4809234 100644
+--- a/hw/gpio/at91pio.c
++++ b/hw/gpio/at91pio.c
+@@ -293,8 +293,7 @@ static const MemoryRegionOps at91pio_ops = {
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+-#ifdef LRK_UNUSED
+-static const VMStateDescription vmstate_pio = {
++static const VMStateDescription vmstate_at91pio = {
+     .name = "at91pio",
+     .version_id = 1,
+     .minimum_version_id = 1,
+@@ -314,36 +313,38 @@ static const VMStateDescription vmstate_pio = {
+         VMSTATE_END_OF_LIST()
+     }
+ };
+-#endif
+ 
+-static int at91pio_init(SysBusDevice *dev)
++static void at91pio_init(Object *obj)
+ {
+-    at91pio_state *s = AT91PIO(dev);
+-    memory_region_init_io(&s->iomem, OBJECT(s), &at91pio_ops, s, "at91pio", 0x5FF);
+-    sysbus_init_mmio(dev, &s->iomem);
+-    sysbus_init_irq(dev, &s->irq);
+-    int i = 0;
+-    for(i=0; i<128; i++){
+-    s->display[i]='\0';
++    at91pio_state *s = AT91PIO(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    
++    memory_region_init_io(&s->iomem, obj, &at91pio_ops, s, "at91pio", 0x5FF);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->irq);
++    
++    for (int i=0; i<128; i++){
++        s->display[i]='\0';
+     }
+     s->display_pos=0;
+     //Telnet-Client for LCD and LED Output. Port 44444
+     if(pio_telnet!=0){
+-    char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server");
++        char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server");
+     }
+-    return 0;
+ }
+ 
+ static void at91pio_class_init(ObjectClass *klass, void *data)
+ {
+-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+-    sdc->init = at91pio_init;
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    
++    dc->vmsd = &vmstate_at91pio;
+ }
+ 
+ static const TypeInfo at91pio_info = {
+     .name          = TYPE_AT91PIO,
+     .parent        = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91pio_state),
++    .instance_init = at91pio_init,
+     .class_init    = at91pio_class_init,
+ };
+ 
+diff --git a/hw/intc/at91_intor.c b/hw/intc/at91_intor.c
+index abea6fc4a4..cd4ed2b953 100644
+--- a/hw/intc/at91_intor.c
++++ b/hw/intc/at91_intor.c
+@@ -53,16 +53,16 @@ static void at91_intor_reset(DeviceState *dev)
+     s->sources = 0;
+ }
+ 
+-static int at91_intor_init(SysBusDevice *sbd)
++static void at91_intor_init(Object *obj)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+-    at91_intor_state *s = AT91_INTOR(dev);
++    DeviceState *dev = DEVICE(obj);
++    at91_intor_state *s = AT91_INTOR(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+ 
+     qdev_init_gpio_in(dev, at91_intor_set_irq, 32);
+     sysbus_init_irq(sbd, &s->parent_irq);
+ 
+     at91_intor_reset(dev);    // FIXME: Is this necessary?
+-    return 0;
+ }
+ 
+ static const VMStateDescription vmstate_at91_intor = {
+@@ -78,8 +78,7 @@ static const VMStateDescription vmstate_at91_intor = {
+ static void at91_intor_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+-    k->init = at91_intor_init;
++    
+     dc->user_creatable = false; /* FIXME explain why */
+     dc->reset = at91_intor_reset;
+     dc->vmsd = &vmstate_at91_intor;
+@@ -89,6 +88,7 @@ static const TypeInfo at91_intor_info = {
+     .name = TYPE_AT91_INTOR,
+     .parent = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91_intor_state),
++    .instance_init = at91_intor_init,
+     .class_init = at91_intor_class_init,
+ };
+ 
+diff --git a/hw/timer/at91st.c b/hw/timer/at91st.c
+index 7cf3481311..81d73a50b3 100644
+--- a/hw/timer/at91st.c
++++ b/hw/timer/at91st.c
+@@ -258,31 +258,30 @@ static void at91st_reset(DeviceState *dev) {
+     at91st_update(s);
+ }
+ 
+-static int at91st_init(SysBusDevice *dev)
++static void at91st_init(Object *obj)
+ {
+-    at91st_state *s = AT91ST(dev);
++    DeviceState *dev = DEVICE(obj);
++    at91st_state *s = AT91ST(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+     struct tm tm;
+ 
+-    memory_region_init_io(&s->iomem, OBJECT(s), &at91st_ops, s, "at91st", 0x1FF);
+-    sysbus_init_mmio(dev, &s->iomem);
++    memory_region_init_io(&s->iomem, obj, &at91st_ops, s, "at91st", 0x1FF);
++    sysbus_init_mmio(sbd, &s->iomem);
+ 
+-    sysbus_init_irq(dev, &s->irq);
++    sysbus_init_irq(sbd, &s->irq);
+     qemu_get_timedate(&tm, 0);
+ 
+     s->st_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, st_interrupt, s);
+     s->wd_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wd_interrupt, s);
+     s->rt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rt_interrupt, s);
+ 
+-    at91st_reset(DEVICE(dev));
+-    return 0;
++    at91st_reset(dev); // is this needed ?
+ }
+ 
+ static void at91st_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+-    k->init = at91st_init;
+     dc->user_creatable = false; /* FIXME explain why */
+     dc->reset = at91st_reset;
+     dc->vmsd = &vmstate_at91st;
+@@ -292,6 +291,7 @@ static const TypeInfo at91st_info = {
+     .name          = TYPE_AT91ST,
+     .parent        = TYPE_SYS_BUS_DEVICE,
+     .instance_size = sizeof(at91st_state),
++    .instance_init = at91st_init,
+     .class_init    = at91st_class_init,
+ };
+ 
+-- 
+2.34.1
+
+
+From 8c51ba268d7920c1283cd15cb368592e30e1c3c5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sat, 29 Sep 2018 20:21:40 +0200
+Subject: [PATCH 14/30] QOM-ify display
+
+---
+ hw/display/at91display.c | 60 +++++++++++++++++++++-------------------
+ 1 file changed, 31 insertions(+), 29 deletions(-)
+
+diff --git a/hw/display/at91display.c b/hw/display/at91display.c
+index 8d6000ba44..d892f532c2 100644
+--- a/hw/display/at91display.c
++++ b/hw/display/at91display.c
+@@ -6,85 +6,87 @@
+ #include "hw/sysbus.h"
+ 
+ #define TYPE_AT91DISPLAY "at91display"
+-#define AT91DISPLAY(obj) OBJECT_CHECK(display_state, (obj), TYPE_AT91DISPLAY)
++#define AT91DISPLAY(obj) OBJECT_CHECK(at91display_state, (obj), TYPE_AT91DISPLAY)
+ 
+ typedef struct {
+     SysBusDevice parent_obj;
+     MemoryRegion iomem;
+     uint32_t charreg;
+-} display_state;
++} at91display_state;
+ 
+-static uint64_t display_read(void *opaque, hwaddr offset, unsigned size)
++static uint64_t at91display_read(void *opaque, hwaddr offset, unsigned size)
+ {
+     return 0;
+ }
+ 
+-static void display_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++static void at91display_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+ {
+-    display_state *s = (display_state *)opaque;
++    at91display_state *s = (at91display_state *)opaque;
+ 
+     //TODO: Don't write if Chipselect is LOW?
+     /*printf("\nW:%c",(char)value);
+     fflush(0);*/
+     switch (offset) {
+-        case 0: //display enable register
+-            s->charreg = value; //der value wird ins display status register eingetragen
++        case 0: //at91display enable register
++            s->charreg = value; //der value wird ins at91display status register eingetragen
+             unsigned int buf[1];
+             buf[0]=value;
+             cpu_physical_memory_write(0xfffff500,buf,1);
+             break;
+         default:
+-            fprintf(stderr, "display A Write: Bad offset %x\n", (int)offset);
++            fprintf(stderr, "at91display A Write: Bad offset %x\n", (int)offset);
+     }
+ }
+ 
+ 
+-static const MemoryRegionOps display_ops = {
+-    .read = display_read,
+-    .write = display_write,
++static const MemoryRegionOps at91display_ops = {
++    .read = at91display_read,
++    .write = at91display_write,
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+-#ifdef LRK_UNUSED
+-static const VMStateDescription vmstate_display = {
++static const VMStateDescription vmstate_at91display = {
+     .name = "at91display",
+     .version_id = 1,
+     .minimum_version_id = 1,
+     .minimum_version_id_old = 1,
+     .fields      = (VMStateField[]) {
+-        VMSTATE_UINT32(charreg, display_state),
++        VMSTATE_UINT32(charreg, at91display_state),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+-#endif
+ 
+-static int display_init(SysBusDevice *dev)
++static void at91display_init(Object *obj)
+ {
+-    display_state *s = AT91DISPLAY(dev);
+-    memory_region_init_io(&s->iomem, OBJECT(s), &display_ops, s, "at91display", 0x40);
+-    sysbus_init_mmio(dev, &s->iomem);
+-    return 0;
++    at91display_state *s = AT91DISPLAY(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    
++    memory_region_init_io(&s->iomem, obj, &at91display_ops, s, "at91display", 0x40);
++    sysbus_init_mmio(sbd, &s->iomem);
+ }
+ 
+-static void display_class_init(ObjectClass *klass, void *data)
++static void at91display_class_init(ObjectClass *klass, void *data)
+ {
+-    SysBusDeviceClass *sdc = SYS_BUS_DEVICE_CLASS(klass);
+-    sdc->init = display_init;
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++    dc->vmsd = &vmstate_at91display;
+ }
+ 
+-static const TypeInfo display_info = {
++static const TypeInfo at91display_info = {
+     .name          = TYPE_AT91DISPLAY,
+     .parent        = TYPE_SYS_BUS_DEVICE,
+-    .instance_size = sizeof(display_state),
+-    .class_init    = display_class_init,
++    .instance_size = sizeof(at91display_state),
++    .instance_init = at91display_init,
++    .class_init    = at91display_class_init,
+ };
+ 
+-static void display_register_types(void)
++static void at91display_register_types(void)
+ {
+     //Achtung! Hier können auch mehrere verschiedene TypeInfos angegeben werden!
+-    type_register_static(&display_info);
++    type_register_static(&at91display_info);
+ }
+ 
+ 
+ 
+-type_init(display_register_types)
++type_init(at91display_register_types)
+-- 
+2.34.1
+
+
+From 43eba86c43afc68ba188aea9dc547b39427baf06 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sun, 30 Sep 2018 13:45:38 +0200
+Subject: [PATCH 15/30] Connect dbgu and usart to serial
+
+---
+ hw/arm/portux920t.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index b934b4c346..ecffa6f7ab 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -17,6 +17,7 @@
+ #include "cpu.h"
+ #include "hw/sysbus.h"
+ #include "hw/devices.h"
++#include "sysemu/sysemu.h"
+ #include "hw/arm/arm.h"
+ #include "hw/boards.h"
+ #include "exec/address-spaces.h"
+@@ -263,13 +264,13 @@ static void portux920t_init(MachineState *machine)
+      * Periphery
+      * +++++++++
+      */
+-    at91dbgu_create(0xFFFFF200, aic_sys[0], NULL);
++    at91dbgu_create(0xFFFFF200, aic_sys[0], serial_hd(0));
+     sysbus_create_simple("at91pio", 0xFFFFF400, NULL);
+     sysbus_create_simple("at91st", 0xFFFFFD00, aic_sys[1]);
+-    at91usart_create(0xFFFC0000, NULL, NULL);
+-    at91usart_create(0xFFFC4000, NULL, NULL);
+-    at91usart_create(0xFFFC8000, NULL, NULL);
+-    at91usart_create(0xFFFCC000, NULL, NULL);
++    at91usart_create(0xFFFC0000, NULL, serial_hd(1));
++    at91usart_create(0xFFFC4000, NULL, serial_hd(2));
++    at91usart_create(0xFFFC8000, NULL, serial_hd(3));
++    at91usart_create(0xFFFCC000, NULL, serial_hd(4));
+ 
+     sysbus_create_simple("at91display", 0x40000000, NULL);
+ 
+-- 
+2.34.1
+
+
+From 2eab4da5568e81e0c2010ffede405f97773e0df9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20K=C3=B6nig?= <leonard.r.koenig@googlemail.com>
+Date: Sun, 20 Oct 2019 13:33:57 +0200
+Subject: [PATCH 16/30] Fix rebase:
+
+ - Finally remove global ARMCPU, move aasr and asr into MC
+ - SysBusDevice is becoming legacy, prepare
+ - Remove overseen merge conflict marker
+---
+ hw/arm/portux920t.c      | 41 ++++++++++++++++------------------------
+ hw/arm/portuxg20.c       | 13 ++++---------
+ hw/char/at91dbgu.c       |  3 +++
+ hw/char/at91usart.c      |  3 +++
+ hw/display/at91display.c |  1 +
+ hw/gpio/at91pio.c        |  3 ++-
+ hw/intc/at91_intor.c     |  2 ++
+ hw/intc/at91aic.c        |  2 ++
+ hw/net/Kconfig           |  6 ++++++
+ hw/net/at91emac.c        | 15 +++++++--------
+ hw/net/at91g20emac.c     | 16 ++++++++--------
+ hw/timer/at91g20st.c     | 16 +++++++++-------
+ hw/timer/at91st.c        |  6 +++++-
+ include/hw/char/at91.h   |  2 ++
+ target/arm/helper.c      |  8 --------
+ 15 files changed, 70 insertions(+), 67 deletions(-)
+
+diff --git a/hw/arm/portux920t.c b/hw/arm/portux920t.c
+index ecffa6f7ab..795e8dbc50 100644
+--- a/hw/arm/portux920t.c
++++ b/hw/arm/portux920t.c
+@@ -15,17 +15,16 @@
+ #include "qemu/osdep.h"
+ #include "qapi/error.h"
+ #include "cpu.h"
++#include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+-#include "hw/devices.h"
++#include "hw/net/at91emac.h"
+ #include "sysemu/sysemu.h"
+-#include "hw/arm/arm.h"
++#include "hw/arm/boot.h"
+ #include "hw/boards.h"
+ #include "exec/address-spaces.h"
+ #include "net/net.h"
+ #include "hw/char/at91.h"
+ 
+-static ARMCPU *cpu; // XXX shouldn't be global probably
+-
+ /*
+  * ++++++++++++++++++++++++++++++++++++
+  * Memory Controller for the Portux920t
+@@ -44,6 +43,8 @@ typedef struct {
+     MemoryRegion iomem;
+     qemu_irq irq;
+ 
++    uint32_t asr;
++    uint32_t aasr;
+     uint32_t mpr;
+ } portux920mc_state;
+ 
+@@ -84,13 +85,12 @@ static uint64_t portux920mc_read(void *opaque, hwaddr offset, unsigned size)
+     uint32_t asr;
+ 
+     switch (offset) {
+-// XXX We don't have global cpu object and neither env with asr and aasr
+     case 0x4: // Abort Status Register
+-        asr = cpu->env.asr;
+-        cpu->env.asr &= ~0x0f000000;
++        asr = s->asr;
++        s->asr &= ~0x0f000000;
+         return asr;
+     case 0x8: // Abort Address Status Register
+-        return cpu->env.aasr;
++        return s->aasr;
+     case 0xC: // Master Priority Register
+         return s->mpr;
+     default:
+@@ -124,8 +124,8 @@ static void portux920mc_reset(DeviceState *dev) {
+     portux920mc_state *s = PORTUX920MC(dev);
+ 
+     s->mpr = 0x3210;
+-    cpu->env.asr = 0; // XXX
+-    cpu->env.aasr = 0;
++    s->asr = 0;
++    s->aasr = 0;
+     do_remap(false);
+ }
+ 
+@@ -142,18 +142,15 @@ static const MemoryRegionOps portux920mc_ops = {
+ /*
+  * Initialization of the memory regions and the IRQ
+  */
+-static int portux920mc_init(SysBusDevice *sbd)
++static void portux920mc_realize(DeviceState *dev, Error **errp)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+     portux920mc_state *s = PORTUX920MC(dev);
+ 
+     memory_region_init_io(&s->iomem, OBJECT(s), &portux920mc_ops, s, "portux920mc", 0x50);
+-    sysbus_init_mmio(sbd, &s->iomem);
+-    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+ 
+     portux920mc_reset(dev);
+-
+-    return 0;
+ }
+ 
+ /*
+@@ -178,9 +175,6 @@ static void portux920t_init(MachineState *machine)
+ {
+     Object *cpuobj;
+     ram_addr_t ram_size = machine->ram_size;
+-    const char *kernel_filename = machine->kernel_filename;
+-    const char *kernel_cmdline = machine->kernel_cmdline;
+-    const char *initrd_filename = machine->initrd_filename;
+     MemoryRegion *sysmem = get_system_memory();
+     MemoryRegion *ram = g_new(MemoryRegion, 1); //1MB Internal Ram
+     MemoryRegion *ram2 = g_new(MemoryRegion, 1); //64MB External Ram
+@@ -188,6 +182,7 @@ static void portux920t_init(MachineState *machine)
+     qemu_irq aic[32];
+     qemu_irq aic_sys[32];
+     DeviceState *dev;
++    ARMCPU *cpu;
+ 
+     /* Warning! This is in fact just a copy of the arm926 with a V4T chip set
+        instead of a V5! */
+@@ -281,13 +276,10 @@ static void portux920t_init(MachineState *machine)
+      * +++++++++++++
+      */
+     portux920t_binfo.ram_size = ram_size;
+-    portux920t_binfo.kernel_filename = kernel_filename;
+-    portux920t_binfo.kernel_cmdline = kernel_cmdline;
+-    portux920t_binfo.initrd_filename = initrd_filename;
+     portux920t_binfo.board_id = 0x310; //found at arm.linux.org.uk/developer/machines/
+     portux920t_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
+ 
+-    arm_load_kernel(cpu, &portux920t_binfo);
++    arm_load_kernel(cpu, machine, &portux920t_binfo);
+ }
+ 
+ static void portux920t_class_init(ObjectClass *oc, void *data)
+@@ -321,9 +313,8 @@ type_init(portux920t_machine_init);
+ static void portux920mc_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+-    k->init = portux920mc_init;
++    dc->realize = portux920mc_realize;
+     dc->reset = portux920mc_reset;
+     dc->vmsd = &vmstate_portux920mc;
+ }
+diff --git a/hw/arm/portuxg20.c b/hw/arm/portuxg20.c
+index 75c80faa44..4ac90eb157 100644
+--- a/hw/arm/portuxg20.c
++++ b/hw/arm/portuxg20.c
+@@ -6,12 +6,13 @@
+ 
+ #include "qemu/osdep.h"
+ #include "cpu.h"
++#include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+-#include "hw/arm/arm.h"
++#include "hw/arm/boot.h"
+ #include "hw/boards.h"
+ #include "exec/address-spaces.h"
+ #include "net/net.h"
+-#include "hw/devices.h"
++#include "hw/net/at91g20emac.h"
+ 
+ /* Board init.  */
+ static struct arm_boot_info portuxg20_binfo;
+@@ -22,9 +23,6 @@ static void portuxg20_init(MachineState *machine)
+ {
+     Object *cpuobj;
+     ram_addr_t ram_size = machine->ram_size;
+-    const char *kernel_filename = machine->kernel_filename;
+-    const char *kernel_cmdline = machine->kernel_cmdline;
+-    const char *initrd_filename = machine->initrd_filename;
+     ARMCPU *cpu;
+     MemoryRegion *sysmem = get_system_memory();
+     MemoryRegion *sram0 = g_new(MemoryRegion, 1); //internal 16kB Ram
+@@ -102,12 +100,9 @@ static void portuxg20_init(MachineState *machine)
+ 
+ 
+     portuxg20_binfo.ram_size = ram_size;
+-    portuxg20_binfo.kernel_filename = kernel_filename;
+-    portuxg20_binfo.kernel_cmdline = kernel_cmdline;
+-    portuxg20_binfo.initrd_filename = initrd_filename;
+     portuxg20_binfo.board_id = 0x88F; //auf seite arm.linux.org.uk/developer/machines/ zu finden
+     portuxg20_binfo.loader_start = 0x20000000; //Start executing at 0x20000000 instead of 0x0
+-    arm_load_kernel(cpu, &portuxg20_binfo);
++    arm_load_kernel(cpu, machine, &portuxg20_binfo);
+ }
+ 
+ static void portuxg20_class_init(ObjectClass *oc, void *data)
+diff --git a/hw/char/at91dbgu.c b/hw/char/at91dbgu.c
+index a3336e7831..59ccb08993 100644
+--- a/hw/char/at91dbgu.c
++++ b/hw/char/at91dbgu.c
+@@ -6,6 +6,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/qdev-properties.h"
++#include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "chardev/char-fe.h"
+ 
+diff --git a/hw/char/at91usart.c b/hw/char/at91usart.c
+index 1816e0d229..052d275663 100644
+--- a/hw/char/at91usart.c
++++ b/hw/char/at91usart.c
+@@ -3,6 +3,9 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/qdev-properties.h"
++#include "hw/irq.h"
++#include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+ #include "chardev/char.h"
+ #include "chardev/char-fe.h"
+diff --git a/hw/display/at91display.c b/hw/display/at91display.c
+index d892f532c2..9a0a323ace 100644
+--- a/hw/display/at91display.c
++++ b/hw/display/at91display.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+ 
+ #define TYPE_AT91DISPLAY "at91display"
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+index 58d4809234..3f402c1201 100644
+--- a/hw/gpio/at91pio.c
++++ b/hw/gpio/at91pio.c
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+ #include "chardev/char-fe.h"
+ 
+@@ -329,7 +330,7 @@ static void at91pio_init(Object *obj)
+     s->display_pos=0;
+     //Telnet-Client for LCD and LED Output. Port 44444
+     if(pio_telnet!=0){
+-        char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server");
++        char_kbs = qemu_chr_new("kbs_telnet", "telnet:localhost:44444,server", NULL);
+     }
+ }
+ 
+diff --git a/hw/intc/at91_intor.c b/hw/intc/at91_intor.c
+index cd4ed2b953..3f309eaa06 100644
+--- a/hw/intc/at91_intor.c
++++ b/hw/intc/at91_intor.c
+@@ -23,6 +23,8 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "migration/vmstate.h"
++#include "hw/irq.h"
+ #include "hw/sysbus.h"
+ 
+ #define TYPE_AT91_INTOR "at91_intor"
+diff --git a/hw/intc/at91aic.c b/hw/intc/at91aic.c
+index e70ca6a796..504483f022 100644
+--- a/hw/intc/at91aic.c
++++ b/hw/intc/at91aic.c
+@@ -12,6 +12,8 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "hw/irq.h"
++#include "migration/vmstate.h"
+ #include <stdio.h>
+ #include <stddef.h>
+ 
+diff --git a/hw/net/Kconfig b/hw/net/Kconfig
+index 3856417d42..f19be52844 100644
+--- a/hw/net/Kconfig
++++ b/hw/net/Kconfig
+@@ -131,3 +131,9 @@ config CAN_SJA1000
+     default y if PCI_DEVICES
+     depends on PCI
+     select CAN_BUS
++
++config AT91EMAC
++    bool
++
++config AT91G20EMAC
++    bool
+diff --git a/hw/net/at91emac.c b/hw/net/at91emac.c
+index bd2b387332..68db6f296e 100644
+--- a/hw/net/at91emac.c
++++ b/hw/net/at91emac.c
+@@ -37,8 +37,10 @@
+ 
+ #include "qemu/osdep.h"
+ #include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "migration/vmstate.h"
+ #include "net/net.h"
+-#include "hw/devices.h"
++#include "hw/net/at91emac.h"
+ 
+ /* #define DEBUG_EMAC */
+ 
+@@ -701,13 +703,12 @@ void at91emac_init1(NICInfo *nd, uint32_t base, qemu_irq irq)
+     sysbus_connect_irq(s, 0, irq);
+ }
+ 
+-static int at91emac_init(SysBusDevice *sbd)
++static void at91emac_realize(DeviceState *dev, Error **errp)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+     at91emac_state *s = AT91EMAC(dev);
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91emac_mem_ops, s, "at91emac", 0x1000);
+-    sysbus_init_mmio(sbd, &s->iomem);
+-    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+     qemu_macaddr_default_if_unset(&s->conf.macaddr);
+     s->nic = qemu_new_nic(&net_at91emac_info, &s->conf,
+                           object_get_typename(OBJECT(dev)), dev->id, s);
+@@ -717,14 +718,12 @@ static int at91emac_init(SysBusDevice *sbd)
+     s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
+     s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
+     at91emac_reset(dev);
+-    return 0;
+ }
+ 
+ static void at91emac_class_init(ObjectClass *klass, void *data){
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+-    k->init = at91emac_init;
++    dc->realize = at91emac_realize;
+     dc->reset = at91emac_reset;
+     dc->vmsd = &vmstate_at91emac;
+     dc->props = at91emac_properties;
+diff --git a/hw/net/at91g20emac.c b/hw/net/at91g20emac.c
+index 0c24cf0842..49d97bb8d5 100644
+--- a/hw/net/at91g20emac.c
++++ b/hw/net/at91g20emac.c
+@@ -38,8 +38,10 @@
+ 
+ #include "qemu/osdep.h"
+ #include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "migration/vmstate.h"
+ #include "net/net.h"
+-#include "hw/devices.h"
++#include "hw/net/at91g20emac.h"
+ 
+ /* #define DEBUG_EMAC */
+ 
+@@ -701,13 +703,12 @@ void at91g20emac_init1(NICInfo *nd, uint32_t base, qemu_irq irq)
+     sysbus_connect_irq(s, 0, irq);
+ }
+ 
+-static int at91g20emac_init(SysBusDevice *sbd)
++static void at91g20emac_realize(DeviceState *dev, Error **erp)
+ {
+-    DeviceState *dev = DEVICE(sbd);
+     at91g20emac_state *s = AT91G20EMAC(dev);
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91g20emac_mem_ops, s, "at91g20emac", 0x1000);
+-    sysbus_init_mmio(sbd, &s->iomem);
+-    sysbus_init_irq(sbd, &s->irq);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+     qemu_macaddr_default_if_unset(&s->conf.macaddr);
+     s->nic = qemu_new_nic(&net_at91g20emac_info, &s->conf,
+                           object_get_typename(OBJECT(dev)), dev->id, s);
+@@ -717,19 +718,18 @@ static int at91g20emac_init(SysBusDevice *sbd)
+     s->sa1l=(s->conf.macaddr.a[3] << 24) | (s->conf.macaddr.a[2] << 16) | (s->conf.macaddr.a[1] << 8) | (s->conf.macaddr.a[0]);
+     s->sa1h=(s->conf.macaddr.a[5] << 8) | (s->conf.macaddr.a[4]);
+     at91g20emac_reset(dev);
+-    return 0;
+ }
+ 
+ static void at91g20emac_class_init(ObjectClass *klass, void *data){
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+-    k->init = at91g20emac_init;
++    dc->realize = at91g20emac_realize;
+     dc->reset = at91g20emac_reset;
+     dc->vmsd = &vmstate_at91g20emac;
+     dc->props = at91g20emac_properties;
+ }
+ 
++
+ static const TypeInfo at91g20emac_info = {
+     .name = TYPE_AT91G20EMAC,
+     .parent = TYPE_SYS_BUS_DEVICE,
+diff --git a/hw/timer/at91g20st.c b/hw/timer/at91g20st.c
+index 33df572f60..ee82ba82d1 100644
+--- a/hw/timer/at91g20st.c
++++ b/hw/timer/at91g20st.c
+@@ -4,6 +4,11 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu-common.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/runstate.h"
++#include "migration/vmstate.h"
++#include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "qemu/timer.h"
+ #include "qemu/cutils.h"
+@@ -292,15 +297,15 @@ static const MemoryRegionOps at91g20st_ops = {
+     .endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+-static int at91g20st_init(SysBusDevice *dev)
++static void at91g20st_realize(DeviceState *dev, Error **erp)
+ {
+     at91g20st_state *s = AT91G20ST(dev);
+     struct tm tm;
+ 
+     memory_region_init_io(&s->iomem, OBJECT(s), &at91g20st_ops, s, "at91g20st", 0x30);
+-    sysbus_init_mmio(dev, &s->iomem);
++    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+ 
+-    sysbus_init_irq(dev, &s->irq);
++    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
+ 
+     s->startup_real_time = s->time_last_change = qemu_clock_get_ns(QEMU_CLOCK_REALTIME); //Save the current timestamp
+ 
+@@ -329,16 +334,13 @@ static int at91g20st_init(SysBusDevice *dev)
+     s->wdt_cr=0x0;
+     s->wdt_mr=0x3FFF2FFF;
+     s->wdt_sr=0x0;
+-
+-    return 0;
+ }
+ 
+ static void at91g20st_class_init(ObjectClass *klass, void *data)
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
+ 
+-    k->init = at91g20st_init;
++    dc->realize = at91g20st_realize;
+     dc->user_creatable = false; /* FIXME explain why */
+     dc->vmsd = &vmstate_at91g20st;
+ }
+diff --git a/hw/timer/at91st.c b/hw/timer/at91st.c
+index 81d73a50b3..85e6c615e3 100644
+--- a/hw/timer/at91st.c
++++ b/hw/timer/at91st.c
+@@ -3,9 +3,13 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu-common.h"
++#include "migration/vmstate.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/runstate.h"
++#include "hw/irq.h"
+ #include "hw/sysbus.h"
+ #include "qemu/timer.h"
+-#include "sysemu/sysemu.h"
+ 
+ #define TYPE_AT91ST "at91st"
+ #define AT91ST(obj) OBJECT_CHECK(at91st_state, (obj), TYPE_AT91ST)
+diff --git a/include/hw/char/at91.h b/include/hw/char/at91.h
+index 5913d2c22d..af92574fb9 100644
+--- a/include/hw/char/at91.h
++++ b/include/hw/char/at91.h
+@@ -15,6 +15,8 @@
+ #ifndef HW_AT91_H
+ #define HW_AT91_H
+ 
++#include "hw/qdev-properties.h"
++
+ static inline DeviceState *at91dbgu_create(hwaddr addr,
+                                         qemu_irq irq,
+                                         Chardev *chr)
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index 8b723ef590..9893fb19b4 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -9605,14 +9605,6 @@ static bool get_phys_addr_lpae(CPUARMState *env, target_ulong address,
+             goto do_fault;
+         }
+     }
+-<<<<<<< HEAD
+-=======
+-    
+-    cpu_restore_state(cs, GETPC(), true /* XXX should TB be interrupted? */);
+-    cpu_loop_exit(cs);
+-}
+-#endif
+->>>>>>> Misc
+ 
+     if (param.using64k) {
+         stride = 13;
+-- 
+2.34.1
+
+
+From 03dc8885de9c451d3141b34bae16654c248c832b Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:19:55 +0100
+Subject: [PATCH 17/30] block/vpc: Make vpc_open() read the full dynamic header
+
+The dynamic header's size is 1024 bytes.
+
+vpc_open() reads only the 512 bytes of the dynamic header into buf[].
+Works, because it doesn't actually access the second half.  However, a
+colleague told me that GCC 11 warns:
+
+    ../block/vpc.c:358:51: error: array subscript 'struct VHDDynDiskHeader[0]' is partly outside array bounds of 'uint8_t[512]' [-Werror=array-bounds]
+
+Clean up to read the full header.
+
+Rename buf[] to dyndisk_header_buf[] while there.
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-2-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 21b08033a6..1ee0001d68 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -220,7 +220,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+     QemuOpts *opts = NULL;
+     Error *local_err = NULL;
+     bool use_chs;
+-    uint8_t buf[HEADER_SIZE];
++    uint8_t dyndisk_header_buf[1024];
+     uint32_t checksum;
+     uint64_t computed_size;
+     uint64_t pagetable_size;
+@@ -342,14 +342,14 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+     }
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset), buf,
+-                         HEADER_SIZE);
++        ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset),
++                         dyndisk_header_buf, 1024);
+         if (ret < 0) {
+             error_setg(errp, "Error reading dynamic VHD header");
+             goto fail;
+         }
+ 
+-        dyndisk_header = (VHDDynDiskHeader *) buf;
++        dyndisk_header = (VHDDynDiskHeader *)dyndisk_header_buf;
+ 
+         if (strncmp(dyndisk_header->magic, "cxsparse", 8)) {
+             error_setg(errp, "Invalid header magic");
+-- 
+2.34.1
+
+
+From 6c5a6bf0745abda6f1bf322bc9034a01f348e489 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:19:56 +0100
+Subject: [PATCH 18/30] block/vpc: Don't abuse the footer buffer as BAT sector
+ buffer
+
+create_dynamic_disk() takes a buffer holding the footer as first
+argument.  It writes out the footer (512 bytes), then reuses the
+buffer to initialize and write out the dynamic header (1024 bytes),
+then reuses it again to initialize and write out BAT sectors (512).
+
+Works, because the caller passes a buffer that is large enough for all
+three purposes.  I hate that.
+
+Use a separate buffer for writing out BAT sectors.  The next commit
+will do the same for the dynamic header.
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-3-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 1ee0001d68..55a12071df 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -828,6 +828,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+ {
+     VHDDynDiskHeader *dyndisk_header =
+         (VHDDynDiskHeader *) buf;
++    uint8_t bat_sector[512];
+     size_t block_size, num_bat_entries;
+     int i;
+     int ret;
+@@ -851,9 +852,9 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     /* Write the initial BAT */
+     offset = 3 * 512;
+ 
+-    memset(buf, 0xFF, 512);
++    memset(bat_sector, 0xFF, 512);
+     for (i = 0; i < DIV_ROUND_UP(num_bat_entries * 4, 512); i++) {
+-        ret = blk_pwrite(blk, offset, buf, 512, 0);
++        ret = blk_pwrite(blk, offset, bat_sector, 512, 0);
+         if (ret < 0) {
+             goto fail;
+         }
+-- 
+2.34.1
+
+
+From 5aa98dcf6b2fdbfa84aa8a84d76469954d705168 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:19:57 +0100
+Subject: [PATCH 19/30] block/vpc: Don't abuse the footer buffer for dynamic
+ header
+
+create_dynamic_disk() takes a buffer holding the footer as first
+argument.  It writes out the footer (512 bytes), then reuses the
+buffer to initialize and write out the dynamic header (1024 bytes).
+
+Works, because the caller passes a buffer that is large enough for
+both purposes.  I hate that.
+
+Use a separate buffer for the dynamic header, and adjust the caller's
+buffer.
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-4-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 22 ++++++++++++----------
+ 1 file changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 55a12071df..6f74cbf109 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -826,8 +826,9 @@ static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
+ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+                                int64_t total_sectors)
+ {
++    uint8_t dyndisk_header_buf[1024];
+     VHDDynDiskHeader *dyndisk_header =
+-        (VHDDynDiskHeader *) buf;
++        (VHDDynDiskHeader *)dyndisk_header_buf;
+     uint8_t bat_sector[512];
+     size_t block_size, num_bat_entries;
+     int i;
+@@ -862,7 +863,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     }
+ 
+     /* Prepare the Dynamic Disk Header */
+-    memset(buf, 0, 1024);
++    memset(dyndisk_header_buf, 0, 1024);
+ 
+     memcpy(dyndisk_header->magic, "cxsparse", 8);
+ 
+@@ -876,12 +877,13 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     dyndisk_header->block_size = cpu_to_be32(block_size);
+     dyndisk_header->max_table_entries = cpu_to_be32(num_bat_entries);
+ 
+-    dyndisk_header->checksum = cpu_to_be32(vpc_checksum(buf, 1024));
++    dyndisk_header->checksum = cpu_to_be32(vpc_checksum(dyndisk_header_buf,
++                                                        1024));
+ 
+     /* Write the header */
+     offset = 512;
+ 
+-    ret = blk_pwrite(blk, offset, buf, 1024, 0);
++    ret = blk_pwrite(blk, offset, dyndisk_header_buf, 1024, 0);
+     if (ret < 0) {
+         goto fail;
+     }
+@@ -976,8 +978,8 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     BlockBackend *blk = NULL;
+     BlockDriverState *bs = NULL;
+ 
+-    uint8_t buf[1024];
+-    VHDFooter *footer = (VHDFooter *) buf;
++    uint8_t footer_buf[HEADER_SIZE];
++    VHDFooter *footer = (VHDFooter *)footer_buf;
+     uint16_t cyls = 0;
+     uint8_t heads = 0;
+     uint8_t secs_per_cyl = 0;
+@@ -1040,7 +1042,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     }
+ 
+     /* Prepare the Hard Disk Footer */
+-    memset(buf, 0, 1024);
++    memset(footer_buf, 0, HEADER_SIZE);
+ 
+     memcpy(footer->creator, "conectix", 8);
+     if (vpc_opts->force_size) {
+@@ -1073,15 +1075,15 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     qemu_uuid_generate(&uuid);
+     footer->uuid = uuid;
+ 
+-    footer->checksum = cpu_to_be32(vpc_checksum(buf, HEADER_SIZE));
++    footer->checksum = cpu_to_be32(vpc_checksum(footer_buf, HEADER_SIZE));
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = create_dynamic_disk(blk, buf, total_sectors);
++        ret = create_dynamic_disk(blk, footer_buf, total_sectors);
+         if (ret < 0) {
+             error_setg(errp, "Unable to create or write VHD header");
+         }
+     } else {
+-        ret = create_fixed_disk(blk, buf, total_size, errp);
++        ret = create_fixed_disk(blk, footer_buf, total_size, errp);
+     }
+ 
+ out:
+-- 
+2.34.1
+
+
+From 69e4e12b261dbfcf539cb7f034f6bc6070d4be24 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:19:58 +0100
+Subject: [PATCH 20/30] block/vpc: Make vpc_checksum() take void *
+
+Some of the next commits will checksum structs.  Change vpc_checksum()
+to take void * instead of uint8_t, to save us pointless casts to
+uint8_t *.
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-5-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 6f74cbf109..951fcd567a 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -172,8 +172,9 @@ static QemuOptsList vpc_runtime_opts = {
+ 
+ static QemuOptsList vpc_create_opts;
+ 
+-static uint32_t vpc_checksum(uint8_t* buf, size_t size)
++static uint32_t vpc_checksum(void *p, size_t size)
+ {
++    uint8_t *buf = p;
+     uint32_t res = 0;
+     int i;
+ 
+-- 
+2.34.1
+
+
+From fd9a19873ed8b184c3238e00e19b16f17f0a27db Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:19:59 +0100
+Subject: [PATCH 21/30] block/vpc: Pad VHDDynDiskHeader, replace uint8_t[]
+ buffers
+
+Pad VHDDynDiskHeader as specified in the "Virtual Hard Disk Image
+Format Specification" version 1.0[*].  Change dynamic disk header
+buffers from uint8_t[1024] to VHDDynDiskHeader.  Their size remains
+the same.
+
+The VHDDynDiskHeader * variables pointing to a VHDDynDiskHeader
+variable right next to it are now silly.  Eliminate them.
+
+[*] http://download.microsoft.com/download/f/f/e/ffef50a5-07dd-4cf8-aaa3-442c0673a029/Virtual%20Hard%20Disk%20Format%20Spec_10_18_06.doc
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-6-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 41 +++++++++++++++++++----------------------
+ 1 file changed, 19 insertions(+), 22 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 951fcd567a..1dd8fb7fe0 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -127,8 +127,11 @@ typedef struct vhd_dyndisk_header {
+         uint32_t    reserved;
+         uint64_t    data_offset;
+     } parent_locator[8];
++    uint8_t     reserved2[256];
+ } QEMU_PACKED VHDDynDiskHeader;
+ 
++QEMU_BUILD_BUG_ON(sizeof(VHDDynDiskHeader) != 1024);
++
+ typedef struct BDRVVPCState {
+     CoMutex lock;
+     uint8_t footer_buf[HEADER_SIZE];
+@@ -217,11 +220,10 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+     BDRVVPCState *s = bs->opaque;
+     int i;
+     VHDFooter *footer;
+-    VHDDynDiskHeader *dyndisk_header;
+     QemuOpts *opts = NULL;
+     Error *local_err = NULL;
+     bool use_chs;
+-    uint8_t dyndisk_header_buf[1024];
++    VHDDynDiskHeader dyndisk_header;
+     uint32_t checksum;
+     uint64_t computed_size;
+     uint64_t pagetable_size;
+@@ -344,21 +346,19 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+ 
+     if (disk_type == VHD_DYNAMIC) {
+         ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset),
+-                         dyndisk_header_buf, 1024);
++                         &dyndisk_header, 1024);
+         if (ret < 0) {
+             error_setg(errp, "Error reading dynamic VHD header");
+             goto fail;
+         }
+ 
+-        dyndisk_header = (VHDDynDiskHeader *)dyndisk_header_buf;
+-
+-        if (strncmp(dyndisk_header->magic, "cxsparse", 8)) {
++        if (strncmp(dyndisk_header.magic, "cxsparse", 8)) {
+             error_setg(errp, "Invalid header magic");
+             ret = -EINVAL;
+             goto fail;
+         }
+ 
+-        s->block_size = be32_to_cpu(dyndisk_header->block_size);
++        s->block_size = be32_to_cpu(dyndisk_header.block_size);
+         if (!is_power_of_2(s->block_size) || s->block_size < BDRV_SECTOR_SIZE) {
+             error_setg(errp, "Invalid block size %" PRIu32, s->block_size);
+             ret = -EINVAL;
+@@ -366,7 +366,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         }
+         s->bitmap_size = ((s->block_size / (8 * 512)) + 511) & ~511;
+ 
+-        s->max_table_entries = be32_to_cpu(dyndisk_header->max_table_entries);
++        s->max_table_entries = be32_to_cpu(dyndisk_header.max_table_entries);
+ 
+         if ((bs->total_sectors * 512) / s->block_size > 0xffffffffU) {
+             error_setg(errp, "Too many blocks");
+@@ -398,7 +398,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+             goto fail;
+         }
+ 
+-        s->bat_offset = be64_to_cpu(dyndisk_header->table_offset);
++        s->bat_offset = be64_to_cpu(dyndisk_header.table_offset);
+ 
+         ret = bdrv_pread(bs->file, s->bat_offset, s->pagetable,
+                          pagetable_size);
+@@ -827,9 +827,7 @@ static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
+ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+                                int64_t total_sectors)
+ {
+-    uint8_t dyndisk_header_buf[1024];
+-    VHDDynDiskHeader *dyndisk_header =
+-        (VHDDynDiskHeader *)dyndisk_header_buf;
++    VHDDynDiskHeader dyndisk_header;
+     uint8_t bat_sector[512];
+     size_t block_size, num_bat_entries;
+     int i;
+@@ -864,27 +862,26 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     }
+ 
+     /* Prepare the Dynamic Disk Header */
+-    memset(dyndisk_header_buf, 0, 1024);
++    memset(&dyndisk_header, 0, 1024);
+ 
+-    memcpy(dyndisk_header->magic, "cxsparse", 8);
++    memcpy(dyndisk_header.magic, "cxsparse", 8);
+ 
+     /*
+      * Note: The spec is actually wrong here for data_offset, it says
+      * 0xFFFFFFFF, but MS tools expect all 64 bits to be set.
+      */
+-    dyndisk_header->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+-    dyndisk_header->table_offset = cpu_to_be64(3 * 512);
+-    dyndisk_header->version = cpu_to_be32(0x00010000);
+-    dyndisk_header->block_size = cpu_to_be32(block_size);
+-    dyndisk_header->max_table_entries = cpu_to_be32(num_bat_entries);
++    dyndisk_header.data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
++    dyndisk_header.table_offset = cpu_to_be64(3 * 512);
++    dyndisk_header.version = cpu_to_be32(0x00010000);
++    dyndisk_header.block_size = cpu_to_be32(block_size);
++    dyndisk_header.max_table_entries = cpu_to_be32(num_bat_entries);
+ 
+-    dyndisk_header->checksum = cpu_to_be32(vpc_checksum(dyndisk_header_buf,
+-                                                        1024));
++    dyndisk_header.checksum = cpu_to_be32(vpc_checksum(&dyndisk_header, 1024));
+ 
+     /* Write the header */
+     offset = 512;
+ 
+-    ret = blk_pwrite(blk, offset, dyndisk_header_buf, 1024, 0);
++    ret = blk_pwrite(blk, offset, &dyndisk_header, 1024, 0);
+     if (ret < 0) {
+         goto fail;
+     }
+-- 
+2.34.1
+
+
+From 2ace433babcf2078f6af259ae0d1096ff838157f Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:20:00 +0100
+Subject: [PATCH 22/30] block/vpc: Use sizeof() instead of 1024 for dynamic
+ header size
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-7-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 1dd8fb7fe0..389f5e820b 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -346,7 +346,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+ 
+     if (disk_type == VHD_DYNAMIC) {
+         ret = bdrv_pread(bs->file, be64_to_cpu(footer->data_offset),
+-                         &dyndisk_header, 1024);
++                         &dyndisk_header, sizeof(dyndisk_header));
+         if (ret < 0) {
+             error_setg(errp, "Error reading dynamic VHD header");
+             goto fail;
+@@ -862,7 +862,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     }
+ 
+     /* Prepare the Dynamic Disk Header */
+-    memset(&dyndisk_header, 0, 1024);
++    memset(&dyndisk_header, 0, sizeof(dyndisk_header));
+ 
+     memcpy(dyndisk_header.magic, "cxsparse", 8);
+ 
+@@ -876,12 +876,13 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     dyndisk_header.block_size = cpu_to_be32(block_size);
+     dyndisk_header.max_table_entries = cpu_to_be32(num_bat_entries);
+ 
+-    dyndisk_header.checksum = cpu_to_be32(vpc_checksum(&dyndisk_header, 1024));
++    dyndisk_header.checksum = cpu_to_be32(
++        vpc_checksum(&dyndisk_header, sizeof(dyndisk_header)));
+ 
+     /* Write the header */
+     offset = 512;
+ 
+-    ret = blk_pwrite(blk, offset, &dyndisk_header, 1024, 0);
++    ret = blk_pwrite(blk, offset, &dyndisk_header, sizeof(dyndisk_header), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+-- 
+2.34.1
+
+
+From bc8dfbae3ffbd5cb16d439eec5ea1f6d2a114bd6 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:20:01 +0100
+Subject: [PATCH 23/30] block/vpc: Pad VHDFooter, replace uint8_t[] buffers
+
+Pad VHDFooter as specified in the "Virtual Hard Disk Image Format
+Specification" version 1.0[*].  Change footer buffers from
+uint8_t[HEADER_SIZE] to VHDFooter.  Their size remains the same.
+
+The VHDFooter * variables pointing to a VHDFooter variable right next
+to it are now silly.  Eliminate them, and shorten the remaining
+variables' names.
+
+Most variables pointing to s->footer are now also silly.  Eliminate
+them, too.
+
+[*] http://download.microsoft.com/download/f/f/e/ffef50a5-07dd-4cf8-aaa3-442c0673a029/Virtual%20Hard%20Disk%20Format%20Spec_10_18_06.doc
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-8-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 77 +++++++++++++++++++++++++----------------------------
+ 1 file changed, 37 insertions(+), 40 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 389f5e820b..c30aa597ad 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -95,8 +95,11 @@ typedef struct vhd_footer {
+     QemuUUID    uuid;
+ 
+     uint8_t     in_saved_state;
++    uint8_t     reserved[427];
+ } QEMU_PACKED VHDFooter;
+ 
++QEMU_BUILD_BUG_ON(sizeof(VHDFooter) != 512);
++
+ typedef struct vhd_dyndisk_header {
+     char        magic[8]; /* "cxsparse" */
+ 
+@@ -134,7 +137,7 @@ QEMU_BUILD_BUG_ON(sizeof(VHDDynDiskHeader) != 1024);
+ 
+ typedef struct BDRVVPCState {
+     CoMutex lock;
+-    uint8_t footer_buf[HEADER_SIZE];
++    VHDFooter footer;
+     uint64_t free_data_block_offset;
+     int max_table_entries;
+     uint32_t *pagetable;
+@@ -252,13 +255,13 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         goto fail;
+     }
+ 
+-    ret = bdrv_pread(bs->file, 0, s->footer_buf, HEADER_SIZE);
++    ret = bdrv_pread(bs->file, 0, &s->footer, HEADER_SIZE);
+     if (ret < 0) {
+         error_setg(errp, "Unable to read VHD header");
+         goto fail;
+     }
+ 
+-    footer = (VHDFooter *) s->footer_buf;
++    footer = &s->footer;
+     if (strncmp(footer->creator, "conectix", 8)) {
+         int64_t offset = bdrv_getlength(bs->file->bs);
+         if (offset < 0) {
+@@ -272,7 +275,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         }
+ 
+         /* If a fixed disk, the footer is found only at the end of the file */
+-        ret = bdrv_pread(bs->file, offset-HEADER_SIZE, s->footer_buf,
++        ret = bdrv_pread(bs->file, offset - HEADER_SIZE, footer,
+                          HEADER_SIZE);
+         if (ret < 0) {
+             goto fail;
+@@ -287,7 +290,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+ 
+     checksum = be32_to_cpu(footer->checksum);
+     footer->checksum = 0;
+-    if (vpc_checksum(s->footer_buf, HEADER_SIZE) != checksum) {
++    if (vpc_checksum(footer, HEADER_SIZE) != checksum) {
+         error_setg(errp, "Incorrect header checksum");
+         ret = -EINVAL;
+         goto fail;
+@@ -538,7 +541,7 @@ static int rewrite_footer(BlockDriverState* bs)
+     BDRVVPCState *s = bs->opaque;
+     int64_t offset = s->free_data_block_offset;
+ 
+-    ret = bdrv_pwrite_sync(bs->file, offset, s->footer_buf, HEADER_SIZE);
++    ret = bdrv_pwrite_sync(bs->file, offset, &s->footer, HEADER_SIZE);
+     if (ret < 0)
+         return ret;
+ 
+@@ -601,9 +604,8 @@ fail:
+ static int vpc_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+ {
+     BDRVVPCState *s = (BDRVVPCState *)bs->opaque;
+-    VHDFooter *footer = (VHDFooter *) s->footer_buf;
+ 
+-    if (be32_to_cpu(footer->type) != VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) != VHD_FIXED) {
+         bdi->cluster_size = s->block_size;
+     }
+ 
+@@ -620,10 +622,9 @@ vpc_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+     int64_t image_offset;
+     int64_t n_bytes;
+     int64_t bytes_done = 0;
+-    VHDFooter *footer = (VHDFooter *) s->footer_buf;
+     QEMUIOVector local_qiov;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_co_preadv(bs->file, offset, bytes, qiov, 0);
+     }
+ 
+@@ -671,10 +672,9 @@ vpc_co_pwritev(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
+     int64_t n_bytes;
+     int64_t bytes_done = 0;
+     int ret = 0;
+-    VHDFooter *footer =  (VHDFooter *) s->footer_buf;
+     QEMUIOVector local_qiov;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_co_pwritev(bs->file, offset, bytes, qiov, 0);
+     }
+ 
+@@ -728,13 +728,12 @@ static int coroutine_fn vpc_co_block_status(BlockDriverState *bs,
+                                             BlockDriverState **file)
+ {
+     BDRVVPCState *s = bs->opaque;
+-    VHDFooter *footer = (VHDFooter*) s->footer_buf;
+     int64_t image_offset;
+     bool allocated;
+     int ret;
+     int64_t n;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         *pnum = bytes;
+         *map = offset;
+         *file = bs->file->bs;
+@@ -977,8 +976,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     BlockBackend *blk = NULL;
+     BlockDriverState *bs = NULL;
+ 
+-    uint8_t footer_buf[HEADER_SIZE];
+-    VHDFooter *footer = (VHDFooter *)footer_buf;
++    VHDFooter footer;
+     uint16_t cyls = 0;
+     uint8_t heads = 0;
+     uint8_t secs_per_cyl = 0;
+@@ -1041,48 +1039,48 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     }
+ 
+     /* Prepare the Hard Disk Footer */
+-    memset(footer_buf, 0, HEADER_SIZE);
++    memset(&footer, 0, HEADER_SIZE);
+ 
+-    memcpy(footer->creator, "conectix", 8);
++    memcpy(footer.creator, "conectix", 8);
+     if (vpc_opts->force_size) {
+-        memcpy(footer->creator_app, "qem2", 4);
++        memcpy(footer.creator_app, "qem2", 4);
+     } else {
+-        memcpy(footer->creator_app, "qemu", 4);
++        memcpy(footer.creator_app, "qemu", 4);
+     }
+-    memcpy(footer->creator_os, "Wi2k", 4);
++    memcpy(footer.creator_os, "Wi2k", 4);
+ 
+-    footer->features = cpu_to_be32(0x02);
+-    footer->version = cpu_to_be32(0x00010000);
++    footer.features = cpu_to_be32(0x02);
++    footer.version = cpu_to_be32(0x00010000);
+     if (disk_type == VHD_DYNAMIC) {
+-        footer->data_offset = cpu_to_be64(HEADER_SIZE);
++        footer.data_offset = cpu_to_be64(HEADER_SIZE);
+     } else {
+-        footer->data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
++        footer.data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+     }
+-    footer->timestamp = cpu_to_be32(time(NULL) - VHD_TIMESTAMP_BASE);
++    footer.timestamp = cpu_to_be32(time(NULL) - VHD_TIMESTAMP_BASE);
+ 
+     /* Version of Virtual PC 2007 */
+-    footer->major = cpu_to_be16(0x0005);
+-    footer->minor = cpu_to_be16(0x0003);
+-    footer->orig_size = cpu_to_be64(total_size);
+-    footer->current_size = cpu_to_be64(total_size);
+-    footer->cyls = cpu_to_be16(cyls);
+-    footer->heads = heads;
+-    footer->secs_per_cyl = secs_per_cyl;
++    footer.major = cpu_to_be16(0x0005);
++    footer.minor = cpu_to_be16(0x0003);
++    footer.orig_size = cpu_to_be64(total_size);
++    footer.current_size = cpu_to_be64(total_size);
++    footer.cyls = cpu_to_be16(cyls);
++    footer.heads = heads;
++    footer.secs_per_cyl = secs_per_cyl;
+ 
+-    footer->type = cpu_to_be32(disk_type);
++    footer.type = cpu_to_be32(disk_type);
+ 
+     qemu_uuid_generate(&uuid);
+-    footer->uuid = uuid;
++    footer.uuid = uuid;
+ 
+-    footer->checksum = cpu_to_be32(vpc_checksum(footer_buf, HEADER_SIZE));
++    footer.checksum = cpu_to_be32(vpc_checksum(&footer, HEADER_SIZE));
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = create_dynamic_disk(blk, footer_buf, total_sectors);
++        ret = create_dynamic_disk(blk, (uint8_t *)&footer, total_sectors);
+         if (ret < 0) {
+             error_setg(errp, "Unable to create or write VHD header");
+         }
+     } else {
+-        ret = create_fixed_disk(blk, footer_buf, total_size, errp);
++        ret = create_fixed_disk(blk, (uint8_t *)&footer, total_size, errp);
+     }
+ 
+ out:
+@@ -1178,9 +1176,8 @@ fail:
+ static int vpc_has_zero_init(BlockDriverState *bs)
+ {
+     BDRVVPCState *s = bs->opaque;
+-    VHDFooter *footer =  (VHDFooter *) s->footer_buf;
+ 
+-    if (be32_to_cpu(footer->type) == VHD_FIXED) {
++    if (be32_to_cpu(s->footer.type) == VHD_FIXED) {
+         return bdrv_has_zero_init(bs->file->bs);
+     } else {
+         return 1;
+-- 
+2.34.1
+
+
+From 11ede69f1b10408cc87f96cfd6d8fe1fec77ee31 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:20:02 +0100
+Subject: [PATCH 24/30] block/vpc: Pass footer buffers as VHDFooter * instead
+ of uint8_t *
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-9-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index c30aa597ad..9211e95bfc 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -823,7 +823,7 @@ static int calculate_geometry(int64_t total_sectors, uint16_t* cyls,
+     return 0;
+ }
+ 
+-static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
++static int create_dynamic_disk(BlockBackend *blk, VHDFooter *footer,
+                                int64_t total_sectors)
+ {
+     VHDDynDiskHeader dyndisk_header;
+@@ -837,13 +837,13 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     block_size = 0x200000;
+     num_bat_entries = DIV_ROUND_UP(total_sectors, block_size / 512);
+ 
+-    ret = blk_pwrite(blk, offset, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, HEADER_SIZE, 0);
+     if (ret < 0) {
+         goto fail;
+     }
+ 
+     offset = 1536 + ((num_bat_entries * 4 + 511) & ~511);
+-    ret = blk_pwrite(blk, offset, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, HEADER_SIZE, 0);
+     if (ret < 0) {
+         goto fail;
+     }
+@@ -891,7 +891,7 @@ static int create_dynamic_disk(BlockBackend *blk, uint8_t *buf,
+     return ret;
+ }
+ 
+-static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
++static int create_fixed_disk(BlockBackend *blk, VHDFooter *footer,
+                              int64_t total_size, Error **errp)
+ {
+     int ret;
+@@ -904,7 +904,7 @@ static int create_fixed_disk(BlockBackend *blk, uint8_t *buf,
+         return ret;
+     }
+ 
+-    ret = blk_pwrite(blk, total_size - HEADER_SIZE, buf, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, total_size - HEADER_SIZE, footer, HEADER_SIZE, 0);
+     if (ret < 0) {
+         error_setg_errno(errp, -ret, "Unable to write VHD header");
+         return ret;
+@@ -1075,12 +1075,12 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     footer.checksum = cpu_to_be32(vpc_checksum(&footer, HEADER_SIZE));
+ 
+     if (disk_type == VHD_DYNAMIC) {
+-        ret = create_dynamic_disk(blk, (uint8_t *)&footer, total_sectors);
++        ret = create_dynamic_disk(blk, &footer, total_sectors);
+         if (ret < 0) {
+             error_setg(errp, "Unable to create or write VHD header");
+         }
+     } else {
+-        ret = create_fixed_disk(blk, (uint8_t *)&footer, total_size, errp);
++        ret = create_fixed_disk(blk, &footer, total_size, errp);
+     }
+ 
+ out:
+-- 
+2.34.1
+
+
+From 95ac47d92494e826a3a2568f27764138ee759423 Mon Sep 17 00:00:00 2001
+From: Markus Armbruster <armbru@redhat.com>
+Date: Thu, 17 Dec 2020 17:20:03 +0100
+Subject: [PATCH 25/30] block/vpc: Use sizeof() instead of HEADER_SIZE for
+ footer size
+
+Signed-off-by: Markus Armbruster <armbru@redhat.com>
+Message-Id: <20201217162003.1102738-10-armbru@redhat.com>
+Reviewed-by: Max Reitz <mreitz@redhat.com>
+Signed-off-by: Kevin Wolf <kwolf@redhat.com>
+---
+ block/vpc.c | 29 ++++++++++++++---------------
+ 1 file changed, 14 insertions(+), 15 deletions(-)
+
+diff --git a/block/vpc.c b/block/vpc.c
+index 9211e95bfc..711adc24f3 100644
+--- a/block/vpc.c
++++ b/block/vpc.c
+@@ -39,8 +39,6 @@
+ 
+ /**************************************************************/
+ 
+-#define HEADER_SIZE 512
+-
+ //#define CACHE
+ 
+ enum vhd_type {
+@@ -255,7 +253,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+         goto fail;
+     }
+ 
+-    ret = bdrv_pread(bs->file, 0, &s->footer, HEADER_SIZE);
++    ret = bdrv_pread(bs->file, 0, &s->footer, sizeof(s->footer));
+     if (ret < 0) {
+         error_setg(errp, "Unable to read VHD header");
+         goto fail;
+@@ -268,15 +266,15 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+             ret = offset;
+             error_setg(errp, "Invalid file size");
+             goto fail;
+-        } else if (offset < HEADER_SIZE) {
++        } else if (offset < sizeof(*footer)) {
+             ret = -EINVAL;
+             error_setg(errp, "File too small for a VHD header");
+             goto fail;
+         }
+ 
+         /* If a fixed disk, the footer is found only at the end of the file */
+-        ret = bdrv_pread(bs->file, offset - HEADER_SIZE, footer,
+-                         HEADER_SIZE);
++        ret = bdrv_pread(bs->file, offset - sizeof(*footer),
++                         footer, sizeof(*footer));
+         if (ret < 0) {
+             goto fail;
+         }
+@@ -290,7 +288,7 @@ static int vpc_open(BlockDriverState *bs, QDict *options, int flags,
+ 
+     checksum = be32_to_cpu(footer->checksum);
+     footer->checksum = 0;
+-    if (vpc_checksum(footer, HEADER_SIZE) != checksum) {
++    if (vpc_checksum(footer, sizeof(*footer)) != checksum) {
+         error_setg(errp, "Incorrect header checksum");
+         ret = -EINVAL;
+         goto fail;
+@@ -541,7 +539,7 @@ static int rewrite_footer(BlockDriverState* bs)
+     BDRVVPCState *s = bs->opaque;
+     int64_t offset = s->free_data_block_offset;
+ 
+-    ret = bdrv_pwrite_sync(bs->file, offset, &s->footer, HEADER_SIZE);
++    ret = bdrv_pwrite_sync(bs->file, offset, &s->footer, sizeof(s->footer));
+     if (ret < 0)
+         return ret;
+ 
+@@ -837,13 +835,13 @@ static int create_dynamic_disk(BlockBackend *blk, VHDFooter *footer,
+     block_size = 0x200000;
+     num_bat_entries = DIV_ROUND_UP(total_sectors, block_size / 512);
+ 
+-    ret = blk_pwrite(blk, offset, footer, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+ 
+     offset = 1536 + ((num_bat_entries * 4 + 511) & ~511);
+-    ret = blk_pwrite(blk, offset, footer, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, offset, footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         goto fail;
+     }
+@@ -897,14 +895,15 @@ static int create_fixed_disk(BlockBackend *blk, VHDFooter *footer,
+     int ret;
+ 
+     /* Add footer to total size */
+-    total_size += HEADER_SIZE;
++    total_size += sizeof(*footer);
+ 
+     ret = blk_truncate(blk, total_size, false, PREALLOC_MODE_OFF, errp);
+     if (ret < 0) {
+         return ret;
+     }
+ 
+-    ret = blk_pwrite(blk, total_size - HEADER_SIZE, footer, HEADER_SIZE, 0);
++    ret = blk_pwrite(blk, total_size - sizeof(*footer),
++                     footer, sizeof(*footer), 0);
+     if (ret < 0) {
+         error_setg_errno(errp, -ret, "Unable to write VHD header");
+         return ret;
+@@ -1039,7 +1038,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     }
+ 
+     /* Prepare the Hard Disk Footer */
+-    memset(&footer, 0, HEADER_SIZE);
++    memset(&footer, 0, sizeof(footer));
+ 
+     memcpy(footer.creator, "conectix", 8);
+     if (vpc_opts->force_size) {
+@@ -1052,7 +1051,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     footer.features = cpu_to_be32(0x02);
+     footer.version = cpu_to_be32(0x00010000);
+     if (disk_type == VHD_DYNAMIC) {
+-        footer.data_offset = cpu_to_be64(HEADER_SIZE);
++        footer.data_offset = cpu_to_be64(sizeof(footer));
+     } else {
+         footer.data_offset = cpu_to_be64(0xFFFFFFFFFFFFFFFFULL);
+     }
+@@ -1072,7 +1071,7 @@ static int coroutine_fn vpc_co_create(BlockdevCreateOptions *opts,
+     qemu_uuid_generate(&uuid);
+     footer.uuid = uuid;
+ 
+-    footer.checksum = cpu_to_be32(vpc_checksum(&footer, HEADER_SIZE));
++    footer.checksum = cpu_to_be32(vpc_checksum(&footer, sizeof(footer)));
+ 
+     if (disk_type == VHD_DYNAMIC) {
+         ret = create_dynamic_disk(blk, &footer, total_sectors);
+-- 
+2.34.1
+
+
+From 9f118e095a1c6e6bb8d98bc34baa2326fd2e71cf Mon Sep 17 00:00:00 2001
+From: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+Date: Mon, 14 Dec 2020 16:09:38 +0100
+Subject: [PATCH 26/30] build: -no-pie is no functional linker flag
+
+Recent binutils changes dropping unsupported options [1] caused a build
+issue in regard to the optionroms.
+
+  ld -m elf_i386 -T /<<PKGBUILDDIR>>/pc-bios/optionrom//flat.lds -no-pie \
+    -s -o multiboot.img multiboot.o
+  ld.bfd: Error: unable to disambiguate: -no-pie (did you mean --no-pie ?)
+
+This isn't really a regression in ld.bfd, filing the bug upstream
+revealed that this never worked as a ld flag [2] - in fact it seems we
+were by accident setting --nmagic).
+
+Since it never had the wanted effect this usage of LDFLAGS_NOPIE, should be
+droppable without any effect. This also is the only use-case of LDFLAGS_NOPIE
+in .mak, therefore we can also remove it from being added there.
+
+[1]: https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=983d925d
+[2]: https://sourceware.org/bugzilla/show_bug.cgi?id=27050#c5
+
+Signed-off-by: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+Message-Id: <20201214150938.1297512-1-christian.ehrhardt@canonical.com>
+Cc: qemu-stable@nongnu.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ configure                  | 12 +++++-------
+ pc-bios/optionrom/Makefile |  4 ++--
+ 2 files changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/configure b/configure
+index 6099be1d84..6b5c837166 100755
+--- a/configure
++++ b/configure
+@@ -2045,7 +2045,6 @@ EOF
+   # check we support --no-pie first...
+   if compile_prog "-Werror -fno-pie" "-no-pie"; then
+     CFLAGS_NOPIE="-fno-pie"
+-    LDFLAGS_NOPIE="-nopie"
+   fi
+ 
+   if compile_prog "-fPIE -DPIE" "-pie"; then
+@@ -7508,14 +7507,13 @@ echo "QEMU_CFLAGS=$QEMU_CFLAGS" >> $config_host_mak
+ echo "QEMU_CXXFLAGS=$QEMU_CXXFLAGS" >> $config_host_mak
+ echo "QEMU_INCLUDES=$QEMU_INCLUDES" >> $config_host_mak
+ if test "$sparse" = "yes" ; then
+-  echo "CC           := REAL_CC=\"\$(CC)\" cgcc"       >> $config_host_mak
+-  echo "CPP          := REAL_CC=\"\$(CPP)\" cgcc"      >> $config_host_mak
+-  echo "CXX          := REAL_CC=\"\$(CXX)\" cgcc"      >> $config_host_mak
+-  echo "HOST_CC      := REAL_CC=\"\$(HOST_CC)\" cgcc"  >> $config_host_mak
+-  echo "QEMU_CFLAGS  += -Wbitwise -Wno-transparent-union -Wno-old-initializer -Wno-non-pointer-null" >> $config_host_mak
++   -  echo "CC           := REAL_CC=\"\$(CC)\" cgcc"       >> $config_host_mak
++   -  echo "CPP          := REAL_CC=\"\$(CPP)\" cgcc"      >> $config_host_mak
++   -  echo "CXX          := REAL_CC=\"\$(CXX)\" cgcc"      >> $config_host_mak
++   -  echo "HOST_CC      := REAL_CC=\"\$(HOST_CC)\" cgcc"  >> $config_host_mak
++   -  echo "QEMU_CFLAGS  += -Wbitwise -Wno-transparent-union -Wno-old-initializer -Wno-non-pointer-null" >> $config_host_mak
+ fi
+ echo "LDFLAGS=$LDFLAGS" >> $config_host_mak
+-echo "LDFLAGS_NOPIE=$LDFLAGS_NOPIE" >> $config_host_mak
+ echo "QEMU_LDFLAGS=$QEMU_LDFLAGS" >> $config_host_mak
+ echo "LD_REL_FLAGS=$LD_REL_FLAGS" >> $config_host_mak
+ echo "LD_I386_EMULATION=$ld_i386_emulation" >> $config_host_mak
+diff --git a/pc-bios/optionrom/Makefile b/pc-bios/optionrom/Makefile
+index e33a24da0d..bbb57ee138 100644
+--- a/pc-bios/optionrom/Makefile
++++ b/pc-bios/optionrom/Makefile
+@@ -47,10 +47,10 @@ build-all: multiboot.bin linuxboot.bin linuxboot_dma.bin kvmvapic.bin pvh.bin
+ 	$(call quiet-command,$(CPP) $(QEMU_INCLUDES) $(QEMU_DGFLAGS) -c -o - $< | $(AS) $(ASFLAGS) -o $@,"AS","$(TARGET_DIR)$@")
+ 
+ pvh.img: pvh.o pvh_main.o
+-	$(call quiet-command,$(LD) $(LDFLAGS_NOPIE) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $^,"BUILD","$(TARGET_DIR)$@")
++	$(call quiet-command,$(LD) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $^,"BUILD","$(TARGET_DIR)$@")
+ 
+ %.img: %.o
+-	$(call quiet-command,$(LD) $(LDFLAGS_NOPIE) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $<,"BUILD","$(TARGET_DIR)$@")
++	$(call quiet-command,$(LD) -m $(LD_I386_EMULATION) -T $(SRC_PATH)/pc-bios/optionrom/flat.lds -s -o $@ $<,"BUILD","$(TARGET_DIR)$@")
+ 
+ %.raw: %.img
+ 	$(call quiet-command,$(OBJCOPY) -O binary -j .text $< $@,"BUILD","$(TARGET_DIR)$@")
+-- 
+2.34.1
+
+
+From acdc61a15626fe01232a408d75a74bc41a2e3798 Mon Sep 17 00:00:00 2001
+From: Carlos Santos <casantos@redhat.com>
+Date: Thu, 17 Oct 2019 09:37:13 -0300
+Subject: [PATCH 27/30] util/cacheinfo: fix crash when compiling with uClibc
+
+uClibc defines _SC_LEVEL1_ICACHE_LINESIZE and _SC_LEVEL1_DCACHE_LINESIZE
+but the corresponding sysconf calls returns -1, which is a valid result,
+meaning that the limit is indeterminate.
+
+Handle this situation using the fallback values instead of crashing due
+to an assertion failure.
+
+Signed-off-by: Carlos Santos <casantos@redhat.com>
+Message-Id: <20191017123713.30192-1-casantos@redhat.com>
+Signed-off-by: Richard Henderson <richard.henderson@linaro.org>
+---
+ util/cacheinfo.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/util/cacheinfo.c b/util/cacheinfo.c
+index ea6f3e99bf..d94dc6adc8 100644
+--- a/util/cacheinfo.c
++++ b/util/cacheinfo.c
+@@ -93,10 +93,16 @@ static void sys_cache_info(int *isize, int *dsize)
+ static void sys_cache_info(int *isize, int *dsize)
+ {
+ # ifdef _SC_LEVEL1_ICACHE_LINESIZE
+-    *isize = sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
++    int tmp_isize = (int) sysconf(_SC_LEVEL1_ICACHE_LINESIZE);
++    if (tmp_isize > 0) {
++        *isize = tmp_isize;
++    }
+ # endif
+ # ifdef _SC_LEVEL1_DCACHE_LINESIZE
+-    *dsize = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
++    int tmp_dsize = (int) sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
++    if (tmp_dsize > 0) {
++        *dsize = tmp_dsize;
++    }
+ # endif
+ }
+ #endif /* sys_cache_info */
+-- 
+2.34.1
+
+
+From 3afca6fcb35596e0061ab3d2e099794bb9cf7ed7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20Janis=20Robert=20K=C3=B6nig?=
+ <leonard.koenig@fu-berlin.de>
+Date: Tue, 26 Oct 2021 22:57:27 +0200
+Subject: [PATCH 28/30] LED trace event
+
+---
+ hw/gpio/at91pio.c    | 20 ++++++++++++++++++++
+ hw/gpio/trace-events |  4 ++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+index 3f402c1201..72ebfd7f15 100644
+--- a/hw/gpio/at91pio.c
++++ b/hw/gpio/at91pio.c
+@@ -6,6 +6,7 @@
+ #include "migration/vmstate.h"
+ #include "hw/sysbus.h"
+ #include "chardev/char-fe.h"
++#include "trace.h"
+ 
+ #define TYPE_AT91PIO "at91pio"
+ #define AT91PIO(obj) OBJECT_CHECK(at91pio_state, (obj), TYPE_AT91PIO)
+@@ -88,6 +89,7 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
+     //printf("\nPIO WRITE: %X | %X",offset, value);
+     //fflush(0);
+     at91pio_state *s = (at91pio_state *)opaque;
++    trace_at91pio_setreg(0xfffff400+offset, value);
+ 
+     uint32_t pioc_ctrl, piob_ctrl;
+ 
+@@ -208,9 +210,15 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
+                     break;
+                 case 0x230: //set output data register
+                     s->piob_odsr = s->piob_odsr|value;
++                    if (s->piob_osr & s->piob_psr & s->piob_odsr & (1<<27)) {
++                        trace_at91pio_led((char*)"yellow", (char*)"on");
++                    }
+                     break;
+                 case 0x234: //clear output data register
+                     s->piob_odsr = s->piob_odsr&(~value);
++                    if (!(s->piob_osr & s->piob_psr & s->piob_odsr & (1<<27))) {
++                        trace_at91pio_led((char*)"yellow", (char*)"off");
++                    }
+                     break;
+                 case 0x270: //TODO Micha? Sind das Lampen? Pio ASR
+                     break;
+@@ -233,9 +241,21 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
                  break;
+             case 0x430: //set output data register
+                 s->pioc_odsr = s->pioc_odsr|value;
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                    trace_at91pio_led((char*)"red", (char*)"on");
++                }
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<2)) {
++                    trace_at91pio_led((char*)"green", (char*)"on");
++                }
+                 break;
+             case 0x434: //clear output data register
+                 s->pioc_odsr = s->pioc_odsr&(~value);
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                    trace_at91pio_led((char*)"red", (char*)"off");
++                }
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<2)) {
++                    trace_at91pio_led((char*)"green", (char*)"off");
++                }
+                 break;
+             case 0x470: //TODO Micha? Sind das Lampen? Pio ASR
+                 break;
+diff --git a/hw/gpio/trace-events b/hw/gpio/trace-events
+index c1271fdfb2..756e10bbb4 100644
+--- a/hw/gpio/trace-events
++++ b/hw/gpio/trace-events
+@@ -5,3 +5,7 @@ nrf51_gpio_read(uint64_t offset, uint64_t r) "offset 0x%" PRIx64 " value 0x%" PR
+ nrf51_gpio_write(uint64_t offset, uint64_t value) "offset 0x%" PRIx64 " value 0x%" PRIx64
+ nrf51_gpio_set(int64_t line, int64_t value) "line %" PRIi64 " value %" PRIi64
+ nrf51_gpio_update_output_irq(int64_t line, int64_t value) "line %" PRIi64 " value %" PRIi64
++
++# at91pio.c
++at91pio_led(char *name, char *value) "LED \"%s\" set to \"%s\""
++at91pio_setreg(int offset, uint64_t value) "MMIO reg 0x%x set to value 0x%" PRIx64
+-- 
+2.34.1
+
+
+From ecba59c252cb0227eeedf5c18ff37927fbd4ee2b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20Janis=20Robert=20K=C3=B6nig?=
+ <leo@secfault-security.com>
+Date: Wed, 27 Oct 2021 12:28:38 +0200
+Subject: [PATCH 29/30] Avoid fcf clashing with i486
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Description: Disable fcf protection in i486 rom builds
+ Some of the qemu roms build really old coe with -march=i486 -m16, but
+ in this more -fcf-protection isn't available, but recently enabled.
+ That causes:
+  cc1: error: ‘-fcf-protection’ is not compatible with this target
+ Avoid that by disabling the feature in these compile calls until the
+ problem is resolved on the toolchain level.
+Forwarded: no
+X-Not-Forwarded-Reason: Only a problem of the Ubuntu compiler defaults
+Author: Christian Ehrhardt <christian.ehrhardt@canonical.com>
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/1940029
+Last-Update: 2021-08-16
+---
+ pc-bios/optionrom/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pc-bios/optionrom/Makefile b/pc-bios/optionrom/Makefile
+index bbb57ee138..f817c618ab 100644
+--- a/pc-bios/optionrom/Makefile
++++ b/pc-bios/optionrom/Makefile
+@@ -13,7 +13,7 @@ $(call set-vpath, $(SRC_PATH)/pc-bios/optionrom)
+ ifeq ($(lastword $(filter -O%, -O0 $(CFLAGS))),-O0)
+ override CFLAGS += -O2
+ endif
+-override CFLAGS += -march=i486
++override CFLAGS += -march=i486 -fcf-protection=none
+ 
+ # Drop -fstack-protector and the like
+ QEMU_CFLAGS := $(filter -W%, $(QEMU_CFLAGS)) $(CFLAGS_NOPIE) -ffreestanding
+-- 
+2.34.1
+
+
+From 4527e392b3585fb080267cb6c9a6f1f476df4600 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Leonard=20Janis=20Robert=20K=C3=B6nig?=
+ <leonard.koenig@fu-berlin.de>
+Date: Fri, 29 Oct 2021 20:49:30 +0200
+Subject: [PATCH 30/30] *cough* 1 != 1<<1
+
+---
+ hw/gpio/at91pio.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/hw/gpio/at91pio.c b/hw/gpio/at91pio.c
+index 72ebfd7f15..ea1adf3bbb 100644
+--- a/hw/gpio/at91pio.c
++++ b/hw/gpio/at91pio.c
+@@ -241,19 +241,19 @@ static void at91pio_write(void *opaque, hwaddr offset, uint64_t value, unsigned
+                 break;
+             case 0x430: //set output data register
+                 s->pioc_odsr = s->pioc_odsr|value;
+-                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<0)) {
+                     trace_at91pio_led((char*)"red", (char*)"on");
+                 }
+-                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<2)) {
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
+                     trace_at91pio_led((char*)"green", (char*)"on");
+                 }
+                 break;
+             case 0x434: //clear output data register
+                 s->pioc_odsr = s->pioc_odsr&(~value);
+-                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<0)) {
+                     trace_at91pio_led((char*)"red", (char*)"off");
+                 }
+-                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<2)) {
++                if (s->pioc_osr & s->pioc_psr & s->pioc_odsr & (1<<1)) {
+                     trace_at91pio_led((char*)"green", (char*)"off");
+                 }
+                 break;
+-- 
+2.34.1
+

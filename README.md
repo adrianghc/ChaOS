@@ -22,15 +22,16 @@ There are two example applications that demonstrate several capabilities of the 
 
 ## Instructions
 
-* Build by running *app=\<num> make*, where *\<num>* is the example application that should run (*1* or *2*).
-* Run by running *make run*.
-* *make debug* starts a debuggable session (under TCP port 12345 by default) that GDB can then connect to.
+* Recommended: Clone, patch and build QEMU by running `make qemu`.
+* Build by running `app=<num> make`, where `<num>` is the example application that should run (`1` or `2`).
+* Run by running `make run` (this assumes the QEMU binary to be in `qemu/build/arm-softmmu/qemu-system-arm`).
+* `make debug` starts a debuggable session (under TCP port 12345 by default) that GDB can then connect to (this also assumes the above location for the QEMU binary).
 
 ### Requirements
 
 * SageMath is required for building. Version 7.4 has been tested.
 * The GNU Arm Embedded Toolchain is required for building.
-* A patched version of QEMU is required to run the OS. The patch (by Leonard König) is available in the *qemu-patch* directory.
+* A patched version of QEMU is required to virtualize the OS and can be built automatically by running `make qemu`. Alternatively, the patch and instructions for how to build and run the patched QEMU manually are available in the *qemu-patch* directory.
 
 ## Design
 

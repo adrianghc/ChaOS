@@ -20,9 +20,8 @@
  * 
  * @return          Dividend modulo divisor
  */
-__attribute__((always_inline))
 __attribute__((section(".lib")))
-inline uint32_t math_mod(uint32_t dividend, uint32_t divisor) {
+uint32_t math_mod(uint32_t dividend, uint32_t divisor) {
 
     // fast path
     uint32_t mask = divisor - 1;
@@ -45,9 +44,8 @@ inline uint32_t math_mod(uint32_t dividend, uint32_t divisor) {
  * 
  * @return          Dividend / divisor
  */
-__attribute__((always_inline))
 __attribute__((section(".lib")))
-inline uint32_t math_div(uint32_t dividend, uint32_t divisor) {
+uint32_t math_div(uint32_t dividend, uint32_t divisor) {
 
     uint32_t i = 0;
 
@@ -74,9 +72,8 @@ inline uint32_t math_div(uint32_t dividend, uint32_t divisor) {
  * 
  * @return          log2(v)
  */
-__attribute__((always_inline))
 __attribute__((section(".lib")))
-inline uint32_t math_log2(uint32_t v) {
+uint32_t math_log2(uint32_t v) {
 
     uint32_t r = (v & 0xAAAAAAAA) != 0;
     r |= ((v & 0xFFFF0000) != 0) << 4;

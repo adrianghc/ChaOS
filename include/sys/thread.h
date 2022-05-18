@@ -6,8 +6,10 @@
  */
 
 
+#include "drivers/cp15.h"
 #include "drivers/util.h"
 #include "lib/inttypes.h"
+#include "lib/math.h"
 
 
 #ifndef THREAD_H_
@@ -76,6 +78,10 @@ struct thread_tcb {
     uint32_t* ttb;
 };
 
+extern struct thread_tcb thread_tcb_list[THREAD_MAX_THREADS];
+extern uint8_t thread_switch_counter;
+extern uint32_t thread_sched_cur_idx;
+
 
 /* BEGIN Idle thread */
 
@@ -107,7 +113,15 @@ struct thread_tcb* thread_get_current(void);
  * 
  * @return                  The fp as a pointer
  */
-uint32_t* thread_get_fp(void);
+__attribute__((always_inline))
+inline uint32_t* thread_get_fp(void) {
+    uint32_t* fp;
+    asm volatile (
+        "mov %[fp], fp \n\t"
+        : [fp] "=r" (fp)
+    );
+    return fp;
+}
 
 /**
  * Saves the context of the last running thread into its TCB.
@@ -115,7 +129,42 @@ uint32_t* thread_get_fp(void);
  * 
  * @param tcb               A pointer to the thread's TCB
  */
-void thread_save_context(struct thread_tcb* tcb);
+__attribute__((always_inline))
+inline void thread_save_context(struct thread_tcb* tcb) {
+
+    uint32_t* ptr;
+    uint8_t i;
+    uint32_t* b;
+    uint32_t s;
+
+    ptr = thread_get_fp() - 6;
+    for (i = 0; i < 4; i++) { // r0-r3
+        tcb->r[i] = ptr[i];
+    }
+
+    tcb->r[11] = ptr[4]; // fp r11
+    tcb->r[12] = ptr[5]; // ip r12
+    tcb->r[15] = ptr[6]; // pc r15
+
+    b = &tcb->r[4];
+    asm volatile ( // r4-r10
+        "stm %[rs], {r4-r10} \n\t"
+        : [rs] "=r" (b)
+    );
+
+    b = &tcb->r[13];
+    asm volatile ( // r13-r14
+        "stm %[rs], {r13-r14}^ \n\t"
+        : [rs] "=r" (b)
+    );
+
+    s = tcb->r[THREAD_REG_CPSR];
+    asm volatile ( // cpsr
+        "mrs %[rs], SPSR \n\t"
+        : [rs] "=r" (s)
+    );
+
+}
 
 /**
  * Returns the context of the last running thread from its TCB.
@@ -123,7 +172,51 @@ void thread_save_context(struct thread_tcb* tcb);
  * 
  * @param tcb               A pointer to the thread's TCB
  */
-void thread_restore_context(struct thread_tcb* tcb);
+__attribute__((always_inline))
+inline void thread_restore_context(struct thread_tcb* tcb) {
+
+    uint32_t* ptr;
+    uint8_t i;
+    uint32_t* b;
+    uint32_t s;
+
+    // set the translation table base so the thread only sees it's own memory space
+    cp15_write_translation_table_base(tcb->ttb);
+    cp15_mmu_enable();
+
+    ptr = thread_get_fp() - 6;
+    for (i = 0; i < 4; i++) { // r0-r3
+        ptr[i] = tcb->r[i];
+    }
+
+    ptr[4] = tcb->r[11]; // fp r11
+    ptr[5] = tcb->r[12]; // ip r12
+    ptr[6] = tcb->r[15]; // pc r15
+
+    b = &tcb->r[4];
+    asm volatile ( // r4-r10
+        "ldm %[rs], {r4-r10} \n\t"
+        : [rs] "=r" (b)
+    );
+
+    b = &tcb->r[13];
+    asm volatile ( // r13-r14
+        "ldm %[rs], {r13-r14}^ \n\t"
+        : [rs] "=r" (b)
+    );
+
+    s = tcb->r[THREAD_REG_CPSR];
+
+    // invalidate caches and TLB
+    cp15_invalidate_caches();
+    cp15_invalidate_tlb();
+
+    asm volatile ( // cpsr
+        "msr SPSR, %[rs] \n\t"
+        : [rs] "=r" (s)
+    );
+
+}
 
 /**
  * Creates a new thread, i.e. allocates a TCB entry and a stack.
@@ -165,18 +258,64 @@ void thread_deactivate(uint32_t id);
 /* BEGIN Scheduling functions */
 
 /**
- * Switches the running thread.
- * 
- * Use only in the IRQ Interrupt Service Routine!
- */
-void thread_switch(void);
-
-/**
  * Selects the next thread to run.
  * 
  * Use only in the IRQ Interrupt Service Routine!
  */
-void thread_select(void);
+__attribute__((always_inline))
+inline void thread_select(void) {
+
+    uint8_t i;
+    uint8_t j;
+    struct thread_tcb* tcb;
+
+    thread_switch_counter = 0;
+
+    // Find out which is the next thread
+    for (i = 1; i <= THREAD_MAX_THREADS; i++) {
+        j = math_mod(thread_sched_cur_idx + i, THREAD_MAX_THREADS);
+        if (!j) {
+            continue;
+        }
+        tcb = &thread_tcb_list[j];
+
+        if (tcb->id && tcb->status == THREAD_STATUS_READY) {
+            // Set the next thread context
+            thread_sched_cur_idx = tcb->id - 1;
+            return;
+        }
+    }
+    thread_sched_cur_idx = 0;
+
+}
+
+/**
+ * Switches the running thread.
+ * 
+ * Use only in the IRQ Interrupt Service Routine!
+ */
+__attribute__((always_inline))
+inline void thread_switch(void) {
+
+    // Check that there is a thread currently running
+    if (thread_tcb_list[thread_sched_cur_idx].status == THREAD_STATUS_RUNNING) {
+        // Do not switch if the thread has not worked through its time slot yet
+        if (thread_switch_counter++ < THREAD_ROUND_ROBIN_TIME_SLOT) {
+            return;
+        }
+        thread_switch_counter = 0;
+
+        // Save the current thread's context and set its status
+        thread_save_context(&thread_tcb_list[thread_sched_cur_idx]);
+        thread_tcb_list[thread_sched_cur_idx].status = THREAD_STATUS_READY;
+    }
+
+    thread_select();
+
+    thread_restore_context(&thread_tcb_list[thread_sched_cur_idx]);
+    thread_tcb_list[thread_sched_cur_idx].status = THREAD_STATUS_RUNNING;
+
+}
 
 /* END Scheduling functions */
 

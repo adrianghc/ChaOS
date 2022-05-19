@@ -75,7 +75,7 @@ size_t io_dbgu_write_output_string(char* str, size_t len) {
 
 /**
  * Reads a character from the DBGU input buffer.
- * Use only in Interupt Service Routines!
+ * Use only in Interrupt Service Routines!
  * 
  * @param c         A pointer to the char to store the result in
  * 
@@ -87,7 +87,7 @@ uint8_t io_dbgu_read_output_char(char* c) {
 
 /**
  * Writes a character into the DBGU input buffer.
- * Use only in Interupt Service Routines!
+ * Use only in Interrupt Service Routines!
  * 
  * @param c         The char to be written into the DBGU input buffer
  * 

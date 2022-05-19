@@ -109,7 +109,7 @@ struct thread_tcb* thread_get_current(void);
 
 /**
  * Gets the fp of the last running thread.
- * Use only in the IRQ Interupt Service Routine!
+ * Use only in the IRQ Interrupt Service Routine!
  * 
  * @return                  The fp as a pointer
  */

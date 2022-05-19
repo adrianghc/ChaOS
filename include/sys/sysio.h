@@ -15,7 +15,7 @@
 
 /**
  * Prints a string given as a format string with any number of arguments.
- * Use only in Interupt Service Routines!
+ * Use only in Interrupt Service Routines!
  * 
  * @param format    Pointer to the format string
  * @param ...       Format string arguments

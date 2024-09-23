@@ -18,25 +18,16 @@ SRCDIR = src
 
 PORT = 12345
 
-
-$(shell mkdir -p $(OUTDIR)/drivers)
-$(shell mkdir -p $(OUTDIR)/lib)
-$(shell mkdir -p $(OUTDIR)/sys)
 $(shell mkdir -p $(BINDIR))
 
-DRIVERS = $(patsubst $(SRCDIR)/drivers/%.c,$(OUTDIR)/drivers/%.o,$(wildcard $(SRCDIR)/drivers/*.c))
-LIB = $(patsubst $(SRCDIR)/lib/%.c,$(OUTDIR)/lib/%.o,$(wildcard $(SRCDIR)/lib/*.c))
-SYS = $(patsubst $(SRCDIR)/sys/%.c,$(OUTDIR)/sys/%.o,$(wildcard $(SRCDIR)/sys/*.c))
+DRIVERS = $(patsubst $(SRCDIR)/drivers/%.c, $(OUTDIR)/drivers/%.o, $(wildcard $(SRCDIR)/drivers/*.c))
+LIB = $(patsubst $(SRCDIR)/lib/%.c, $(OUTDIR)/lib/%.o, $(wildcard $(SRCDIR)/lib/*.c))
+SYS = $(patsubst $(SRCDIR)/sys/%.c, $(OUTDIR)/sys/%.o, $(wildcard $(SRCDIR)/sys/*.c))
 
-$(OUTDIR)/%.o: $(SRCDIR)/%.c
-	$(CC) $(INCLUDES) $(CFLAGS) -c $< -o $@
+.PHONY: all qemu clean-qemu run debug clean
 
-
-.PHONY: all
 all: kernel
 
-
-.PHONY: qemu
 qemu:
 	git clone https://gitlab.com/qemu-project/qemu.git && \
 	cd qemu && git checkout 6cdf8c4efa073eac7d5f9894329e2d07743c2955 && \
@@ -44,26 +35,24 @@ qemu:
 	mkdir build && cd build && \
 	../configure --disable-werror --target-list=arm-softmmu && make -j$(nproc)
 
-.PHONY: clean-qemu
 clean-qemu:
 	rm -rf qemu
 
-
-.PHONY: run
 run:
 	$(QEMU) $(QEMU_ARGS) -kernel $(BINDIR)/kernel
 
-.PHONY: debug
 debug:
 	$(QEMU) $(QEMU_ARGS) -kernel $(BINDIR)/kernel -S -gdb tcp::$(PORT)
 
-.PHONY: clean
 clean:
 	rm -rf $(OUTDIR)
 	rm -rf $(BINDIR)
-
 
 kernel: $(DRIVERS) $(LIB) $(SYS) $(OUTDIR)/app$(app).o $(OUTDIR)/kernel.o
 	$(LD) -T$(LSCRIPT) -o $(OUTDIR)/$@ $(OUTDIR)/$@.o $(OUTDIR)/app$(app).o \
 		$(wildcard $(OUTDIR)/drivers/*.o) $(wildcard $(OUTDIR)/lib/*.o) $(wildcard $(OUTDIR)/sys/*.o)
 	cp $(OUTDIR)/$@ $(BINDIR)/$@
+
+$(OUTDIR)/%.o: $(SRCDIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(INCLUDES) $(CFLAGS) -c $< -o $@

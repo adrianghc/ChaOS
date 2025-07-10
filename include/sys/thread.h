@@ -180,7 +180,7 @@ inline void thread_restore_context(struct thread_tcb* tcb) {
     uint32_t* b;
     uint32_t s;
 
-    // set the translation table base so the thread only sees it's own memory space
+    // Set the translation table base so the thread only sees its own address space
     cp15_write_translation_table_base(tcb->ttb);
     cp15_mmu_enable();
 
@@ -207,7 +207,7 @@ inline void thread_restore_context(struct thread_tcb* tcb) {
 
     s = tcb->r[THREAD_REG_CPSR];
 
-    // invalidate caches and TLB
+    // Invalidate caches and TLB
     cp15_invalidate_caches();
     cp15_invalidate_tlb();
 

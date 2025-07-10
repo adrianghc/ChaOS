@@ -4,12 +4,12 @@
  * 
  * An application to demonstrate protection against various forbidden actions:
  * 
- * 0. Accessing a NULL pointer.
- * 1. Reading kernel data.
- * 2. Writing into program text in memory.
- * 3. Overflowing the stack.
- * 4. Reading from an unmapped address.
- * 5. Reading from an address that would normally be unmapped.
+ * 0 - Accessing a NULL pointer.
+ * 1 - Reading kernel data.
+ * 2 - Writing into program text in memory.
+ * 3 - Overflowing the stack.
+ * 4 - Reading from an unmapped address.
+ * 5 - Reading from an address that would normally be unmapped.
  */
 
 

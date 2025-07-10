@@ -20,7 +20,8 @@ make -j$(nproc)
 
 ### Troubleshooting
 
-You may encounter the following errors when building the project. Below are possible solutions that you can apply if you are running Debian, Ubuntu, or a similar derivative with the APT package manager.
+You may encounter the following errors when building the project. Below are possible solutions that
+you can apply if you are running Debian, Ubuntu, or a similar derivative with the APT package manager.
 
 > ERROR: pkg-config binary 'pkg-config' not found
 
@@ -37,7 +38,8 @@ Solution: Execute `sudo apt install libpixman-1-dev`
 
 ### Running
 
-If the build is successful, there will be a binary called `qemu-system-arm` in `build/arm-softmmu`. This binary needs to be called as follows:
+If the build is successful, there will be a binary called `qemu-system-arm` in `build/arm-softmmu`.
+This binary needs to be called as follows:
 
 ```bash
 qemu-system-arm -M portux920t \
@@ -48,7 +50,8 @@ qemu-system-arm -M portux920t \
                 -kernel path/to/kernel.elf
 ```
 
-This will launch QEMU without a window, multiplexing serial and the QEMU monitor into stdio. Alternatively, QEMU can be launched with a graphical window:
+This will launch QEMU without a window, multiplexing serial and the QEMU monitor into stdio.
+Alternatively, QEMU can be launched with a graphical window:
 
 ```bash
 qemu-system-arm -M portux920t \

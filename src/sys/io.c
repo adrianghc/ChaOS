@@ -34,7 +34,7 @@ void io_dbgu_init(void) {
 }
 
 /**
- * Reads at most @param maxlen bytes from the DBGU input buffer into the given string buffer.
+ * Reads at most `maxlen` bytes from the DBGU input buffer into the given string buffer.
  * 
  * @param str       A pointer to the buffer to store the result in
  * @param maxlen    The number of bytes to be read from the DBGU input buffer
@@ -53,7 +53,7 @@ void io_dbgu_read_flush(void) {
 }
 
 /**
- * Writes @param len bytes from the given string buffer into the DBGU output buffer.
+ * Writes `len` bytes from the given string buffer into the DBGU output buffer.
  * 
  * @param str       A pointer to the string to be written into the DBGU output buffer
  * @param len       The number of bytes to be written into the DBGU output buffer

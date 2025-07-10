@@ -60,8 +60,8 @@ int8_t ring_is_empty(struct ring_buffer* rb);
 int8_t ring_is_full(struct ring_buffer* rb);
 
 /**
- * Peeks into the ring, i.e. reads the next @param size bytes and saves them
- * into @param target WITHOUT deleting them from the ring buffer.
+ * Peeks into the ring, i.e. reads the next `size` bytes and saves them
+ * into `target` WITHOUT deleting them from the ring buffer.
  * 
  * @param rb        A pointer to the ring buffer struct to be peeked from
  * @param target    The result buffer
@@ -72,8 +72,8 @@ int8_t ring_is_full(struct ring_buffer* rb);
 size_t ring_peek(struct ring_buffer* rb, int8_t* target, size_t size);
 
 /**
- * Reads from the ring, i.e. reads the next @param size bytes and saves them
- * into @param target, deleting them from the ring buffer.
+ * Reads from the ring, i.e. reads the next `size` bytes and saves them
+ * into `target`, deleting them from the ring buffer.
  * 
  * @param rb        A pointer to the ring buffer struct to be read from
  * @param target    The result buffer
@@ -84,8 +84,8 @@ size_t ring_peek(struct ring_buffer* rb, int8_t* target, size_t size);
 size_t ring_read(struct ring_buffer* rb, int8_t* target, size_t size);
 
 /**
- * Writes into the ring, i.e. writes @param size bytes from @param source
- * into the ring buffer.
+ * Writes into the ring, i.e. writes `size` bytes from `source` into the
+ * ring buffer.
  * 
  * @param rb        A pointer to the ring buffer struct to be written to
  * @param source    The source buffer

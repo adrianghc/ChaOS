@@ -30,7 +30,7 @@ struct kmem_header {
  * 
  * @param header    A pointer to the header
  * 
- * @return          The pointer, or 0 iff @param header has no predecessor
+ * @return          The pointer, or 0 iff `header` has no predecessor
  */
 struct kmem_header* kmem_prev(struct kmem_header* header);
 
@@ -39,7 +39,7 @@ struct kmem_header* kmem_prev(struct kmem_header* header);
  * 
  * @param header    A pointer to the header
  * 
- * @return          The pointer, or 0 iff @param header has no successor
+ * @return          The pointer, or 0 iff `header` has no successor
  */
 struct kmem_header* kmem_next(struct kmem_header* header);
 
@@ -97,7 +97,7 @@ uint32_t kmem_len(struct kmem_header* header);
 
 
 /**
- * Tries to split an unreserved entry in two chunks of @param size bytes and the remaining size.
+ * Tries to split an unreserved entry in two chunks of `size` bytes and the remaining size.
  * Works only with unreserved entries.
  * 
  * @param header    A pointer to the entry to split
@@ -127,7 +127,7 @@ int8_t kmem_join(struct kmem_header* header);
  * @param header    A pointer to the entry to be reserved
  * 
  * @return          1 = the reservation was successful,
- *                  0 = @param header is the last entry
+ *                  0 = `header` is the last entry
  */
 int8_t kmem_reserve(struct kmem_header* header);
 
@@ -137,13 +137,13 @@ int8_t kmem_reserve(struct kmem_header* header);
  * @param header    A pointer to the entry to be released
  * 
  * @return          1 = the release was successful,
- *                  0 = @param header is the last entry
+ *                  0 = `header` is the last entry
  */
 int8_t kmem_release(struct kmem_header* header);
 
 
 /**
- * Allocates @param size bytes.
+ * Allocates `size` bytes.
  * 
  * @param header    A pointer to the first header
  * @param size      The number of bytes to be allocated
@@ -153,7 +153,7 @@ int8_t kmem_release(struct kmem_header* header);
 void* kmem_alloc(struct kmem_header* header, uint32_t size);
 
 /**
- * Allocates @param size bytes.
+ * Allocates `size` bytes.
  * 
  * @param size      The number of bytes to be allocated
  * 

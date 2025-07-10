@@ -30,7 +30,7 @@ void exit(int32_t status) {
 }
 
 /**
- * Launches a new thread. All parameters are optional, depending the signature of @param text.
+ * Launches a new thread. All parameters are optional, depending the signature of `text`.
  * 
  * @param text      A pointer to the new thread's text segment
  * @param param1    The first parameter the new thread's function should be launched with

@@ -183,7 +183,7 @@ uint8_t memmgmt_free_page(uint16_t page) {
 }
 
 /**
- * Frees a block of @param pages_num contiguous pages beginning at a given address.
+ * Frees a block of `pages_num` contiguous pages beginning at a given address.
  * 
  * @param pages_num The number of contiguous pages to free
  * @param page_addr The first address of the first page of the block
@@ -282,7 +282,7 @@ int32_t memmgmt_allocate_four_pages(void) {
 }
 
 /**
- * Allocates a block of @param pages_num contiguous pages.
+ * Allocates a block of `pages_num` contiguous pages.
  * 
  * @param pages_num The number of pages to allocate contiguously
  * 

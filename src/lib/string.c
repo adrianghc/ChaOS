@@ -146,12 +146,12 @@ size_t interpolate(char* target, size_t cap, const char* format, ...) {
 
 /**
  * Calculates the length of a string as long as it's lower or equal to the given maximum length.
- * If the string is longer than @param maxlen, maxlen will be returned as the length.
+ * If the string is longer than `maxlen`, maxlen will be returned as the length.
  * 
  * @param str       Pointer to the string
  * @param maxlen    The maximum length of the string
  * 
- * @return          The length of the string or @param maxlen if the length exceeds it
+ * @return          The length of the string or `maxlen` if the length exceeds it
  */
 __attribute__((section(".lib")))
 size_t strnlen(char* str, size_t maxlen) {

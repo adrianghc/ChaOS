@@ -2,7 +2,7 @@
 
 ### Tim Scheuermann, Julian Holzwarth & Adrian Herrmann
 
-This project was developed during Barry Linnert's operating systems course at Freie Universität Berlin over the course of fourteen weeks in 2018-2019.
+This project was developed during Barry Linnert's operating systems course at Freie Universität Berlin over the course of fourteen weeks in 2018-2019, plus minor adjustments in subsequent years.
 
 It is a small microkernel operating system developed from scratch for the ARM-based *taskit Portux MiniPC* SoC with an *AT91RM9200* CPU, 16 MiB Flash memory and 64 MiB RAM.
 
@@ -32,11 +32,12 @@ There are two example applications that demonstrate several capabilities of the 
 * Build by running `app=<num> make`, where `<num>` is the example application that should run (`1` or `2`).
 * Run by running `make run` (this assumes the QEMU binary to be in `qemu/build/arm-softmmu/qemu-system-arm`).
 * `make debug` starts a debuggable session (under TCP port 12345 by default) that GDB can then connect to (this also assumes the above location for the QEMU binary).
+* Exit from QEMU by pressing Ctrl + A, then X.
 
 ### Requirements
 
-* The GNU Arm Embedded Toolchain (arm-none-eabi) is required for building.
-* A patched version of QEMU is required to virtualize the OS and can be built automatically by running `make qemu`. Alternatively, the patch and instructions for how to build and run the patched QEMU manually are available in the *qemu-patch* directory.
+* The GNU Arm Embedded Toolchain (`arm-none-eabi`) is required for building.
+* A patched version of QEMU is required to virtualize the OS and can be built automatically by running `make qemu`. Alternatively, the patch and instructions for how to build and run the patched QEMU manually are available in the `qemu-patch` directory. Building QEMU requires that `pkg-config`, `glib`, `gthread` and `pixman` be installed. Refer to the [QEMU patch's README](qemu-patch/README.md) for troubleshooting steps.
 
 ## Design
 
@@ -54,7 +55,7 @@ There are two example applications that demonstrate several capabilities of the 
 
 `qemu-patch` includes the patch necessary for QEMU to emulate the target platform.
 
-### Memory organization
+### Memory layout
 
 All interrupt mode stacks are placed at the end of the internal RAM.
 

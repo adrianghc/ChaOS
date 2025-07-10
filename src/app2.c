@@ -34,10 +34,14 @@ void write_own_text(void) {
     *((uint32_t*)&write_own_text) = 10; 
 }
 
+#pragma GCC diagnostic push
+// GCC reports an infinite recursion here, this is by design to cause a stack overflow.
+#pragma GCC diagnostic ignored "-Winfinite-recursion"
 __attribute__((section(".lib")))
 void stack_overflow(void) {
     stack_overflow();
 }
+#pragma GCC diagnostic pop
 
 __attribute__((section(".lib")))
 void read_unmapped_address(void) {

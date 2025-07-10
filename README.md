@@ -18,8 +18,18 @@ It is a small microkernel operating system developed from scratch for the ARM-ba
 
 There are two example applications that demonstrate several capabilities of the kernel:
 
-1. An application to demonstrate address space separation, context switching, system calls and process/thread creation.
-2. An application to demonstrate protection against various forbidden actions.
+1. An application to demonstrate address space separation, context switching, system calls and process/thread creation:
+    * An initial process waits for user input and creates a new process when a character is entered (with that character as the process' input).
+    * The new process stores the character in its address space, initializes a counter at 0 and starts two new threads in its own address space.
+    * All three threads enter a loop where they increase the shared counter and a private counter as long as the former is under a predefined limit, print a message, and sleep for a moment.
+    * The printed message is formatted as follows: `<letter><thread number>: <global counter value> (<local counter value>)`
+2. An application to demonstrate protection against various forbidden actions:
+    * 0 - Accessing a NULL pointer.
+    * 1 - Reading kernel data.
+    * 2 - Writing into program text in memory.
+    * 3 - Overflowing the stack.
+    * 4 - Reading from an unmapped address.
+    * 5 - Reading from an address that would normally be unmapped.
 
 ## Limitations
 

@@ -18,7 +18,7 @@
 #define KB                  1024
 #define MB                  (1024 * KB)
 
-/* BEGIN Memory organisation */
+/* BEGIN Memory layout */
 
 #define BOOT_MEM            0x00000000
 #define INT_ROM             0x00100000
@@ -47,7 +47,7 @@
 #define CS6                 0x70000000
 #define CS7                 0x80000000
 
-/* END Memory organisation */
+/* END Memory layout */
 
 
 /* BEGIN Functions to read and write to memory directly */

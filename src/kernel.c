@@ -12,6 +12,7 @@
 #include "drivers/init.h"
 #include "drivers/timer.h"
 #include "sys/io.h"
+#include "sys/kmem.h"
 #include "sys/memmgmt.h"
 #include "sys/sysio.h"
 #include "sys/thread.h"
@@ -29,7 +30,7 @@ void _start() {
     init_stacks();
 
     // Init the kernel memory management
-    // kmem_init(KMEM_START, KMEM_SIZE);
+    // kmem_init((void*) KMEM_START, KMEM_SIZE);
 
     io_dbgu_init();
 
@@ -63,7 +64,6 @@ void _start() {
         thread_activate(thread->id);
     }
 
-    // timer_init_periodical(32768);
     timer_init_real_time(32);
     timer_init_periodical(32);
     // Nothing should be executed after this line

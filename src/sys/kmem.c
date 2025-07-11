@@ -10,10 +10,6 @@
 #include "drivers/util.h"
 
 
-#define KMEM_START  INT_RAM + KB
-#define KMEM_SIZE   11 * KB
-
-
 /**
  * Returns a pointer to the previous entry for a given header.
  * 

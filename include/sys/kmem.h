@@ -12,6 +12,9 @@
 #ifndef KMEM_H_
 #define KMEM_H_
 
+#define KMEM_START  INT_RAM + KB
+#define KMEM_SIZE   11 * KB
+
 
 /**
  * The struct for a kernel dynamic memory management entry header.

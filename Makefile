@@ -49,7 +49,7 @@ clean:
 	rm -rf $(BINDIR)
 
 kernel: $(DRIVERS) $(LIB) $(SYS) $(OUTDIR)/app$(app).o $(OUTDIR)/kernel.o
-	$(LD) -T$(LSCRIPT) -o $(OUTDIR)/$@ $(OUTDIR)/$@.o $(OUTDIR)/app$(app).o \
+	$(LD) -T$(LSCRIPT) --no-warn-rwx-segments -o $(OUTDIR)/$@ $(OUTDIR)/$@.o $(OUTDIR)/app$(app).o \
 		$(wildcard $(OUTDIR)/drivers/*.o) $(wildcard $(OUTDIR)/lib/*.o) $(wildcard $(OUTDIR)/sys/*.o)
 	cp $(OUTDIR)/$@ $(BINDIR)/$@
 

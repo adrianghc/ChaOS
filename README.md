@@ -5,7 +5,7 @@
 This project was developed during Barry Linnert's operating systems course at Freie Universität
 Berlin over the course of fourteen weeks in 2018-2019, plus minor adjustments in subsequent years.
 
-It is a small microkernel operating system developed from scratch for the ARM-based *taskit Portux MiniPC* 
+It is a small operating system developed from scratch for the ARM-based *taskit Portux MiniPC* 
 SoC with an *AT91RM9200* CPU, 16 MiB Flash memory and 64 MiB RAM.
 
 ## Supported features

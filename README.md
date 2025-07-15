@@ -10,12 +10,13 @@ SoC with an *AT91RM9200* CPU, 16 MiB Flash memory and 64 MiB RAM.
 
 ## Supported features
 
-* Serial interface (DBGU) driver (supports read/write, interrupts)
-* Processor modes, stacks, dynamic kernel memory management
-* Interrupt handlers (SWI, ABT, FIQ, IRQ, UND)
+* Serial interface (DBGU) driver via MMIO (supports read/write, interrupts)
+* Dynamic kernel memory management
+* Processor modes, stacks (svc, und, abt, irq, fiq)
+* Interrupt handlers (Undefined Instruction, SWI, Prefetch Abort, Data Abort, IRQ, FIQ)
 * System timer and scheduling
 * Processes/threads, context switches, simple round-robin-based scheduling (preemptive multitasking)
-* Memory protection with MMU, logical address spaces
+* Memory protection and logical address spaces via MMU
 * User/kernel interface (syscalls, utility library)
 
 There are two example applications that demonstrate several capabilities of the kernel:
